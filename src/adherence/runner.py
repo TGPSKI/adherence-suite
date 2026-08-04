@@ -251,6 +251,14 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
     out_dir = Path(tempfile.mkdtemp(prefix=f"adh-out-{scen_dir.name}-"))
 
     materialize(scen_dir, sandbox, meta)
+    # PR-derived scenarios ship a task record the grader needs and the
+    # agent must not have: test files, the merge commit, the test command.
+    # It lands before the baseline commit so it is tracked-and-clean and
+    # never shows up as an agent edit, and it names no source path the
+    # prompt withheld.
+    task_json = scen_dir / "task.json"
+    if task_json.is_file():
+        (sandbox / ".adh-task.json").write_text(task_json.read_text())
     # Per-fixture ignore set, installed before anything can dirty the
     # tree. `ignore:` in scenario.yaml lists whatever this repo's own
     # test run writes and its .gitignore misses (H9).

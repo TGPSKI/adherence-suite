@@ -16,7 +16,7 @@ RUNNER   = $(PYTHON) -m adherence.runner --adapter $(ADAPTER) --model $(MODEL) \
              --trials $(TRIALS) $(ARMFLAGS) --out $(OUT)
 
 .PHONY: help check ci-local compile selftest schema lint table matrix report \
-	analyze calibrate screen mkpr run all clean
+	analyze calibrate screen mkpr mkscenarios probe run all clean
 
 help:
 	@printf '%s\n' \
@@ -38,7 +38,9 @@ help:
 		'  make run S=s05             one scenario' \
 		'  make all                   the full suite' \
 		'  make screen                score candidate fixture repos (needs gh)' \
-		'  make mkpr REPO= MIRROR= SINCE=  merged PRs -> scenarios, gradeability proven' \
+		'  make mkpr REPO= MIRROR= SINCE=  merged PRs -> tasks, gradeability proven' \
+		'  make mkscenarios TASKS= MIRROR= FIXTURE=  tasks -> runnable scenarios' \
+		'  make probe SUITE=          difficulty probe: A1 only, no generation' \
 		'' \
 		'variables:' \
 		'  MODEL    <provider>/<model>; provider is a key in bench/opencode-bench.json' \
@@ -91,6 +93,22 @@ calibrate:
 
 screen:
 	$(PY) -m adherence.screen_repos
+
+## Turn a verified task set into runnable scenarios
+mkscenarios:
+	@test -n "$(TASKS)" -a -n "$(MIRROR)" -a -n "$(FIXTURE)" || { \
+		echo 'usage: make mkscenarios TASKS=scenarios-pr/x MIRROR=fixtures/x.git FIXTURE=x'; exit 1; }
+	$(PY) -m adherence.mkscenarios --tasks $(TASKS) --mirror $(MIRROR) \
+		--fixture $(FIXTURE) --suite $(or $(SUITE),suite-pr.yaml)
+
+## Difficulty probe: A1 only, no context generation. Answers "can these
+## tasks discriminate?" before any of the expensive work.
+probe:
+	@test -n "$(SUITE)" || { echo 'usage: make probe SUITE=suite-pr.yaml [TRIALS=3]'; exit 1; }
+	bench/isolate.sh $(PYTHON) -m adherence.runner --suite $(SUITE) \
+		--adapter $(ADAPTER) --model $(MODEL) --trials $(or $(TRIALS),3) \
+		--arm a1 --out $(or $(OUT),runs/probe.jsonl)
+	@$(PY) -m adherence.probe $(or $(OUT),runs/probe.jsonl)
 
 ## Extract merged PRs into scenarios and prove each is gradeable (no model)
 mkpr:
