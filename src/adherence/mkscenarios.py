@@ -88,6 +88,14 @@ def main():
             "pr": t["pr"], "merge_commit": t["merge_commit"],
             "test_files": t["test_files"], "test_cmd": t["test_cmd"],
             "code_files": t["code_files"],
+            # The mirror, so a CLI-graded task can build the PR's own
+            # binary as its oracle.
+            "repo": args.mirror,
+            # "unit" when the PR's tests compile against any correct
+            # implementation; "cli" when they name symbols the PR
+            # introduces, which no agent can be expected to guess.
+            "grader": t.get("grader", "unit"),
+            "invented_symbols": t.get("invented_symbols", []),
         }, indent=2) + "\n")
         ids.append(sid)
 

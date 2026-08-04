@@ -97,6 +97,32 @@ def grade(sandbox, transcript, final) -> list[Check]:
                            "no probes recorded before the first edit; the "
                            "adapter may not emit probe events"))
 
+    # --- CLI-boundary grading, when the unit tests cannot be fair ------
+    # A feature PR's tests reference symbols the PR introduces, so they do
+    # not compile against an agent that named its internals differently --
+    # measured: 0-5% on every such task, on runs that had already passed
+    # diff_coverage. mkpr marks those tasks, and they are graded against
+    # what the PR publicly promises instead: the merge commit's own binary
+    # is the oracle, and the comparison is flag-for-flag at the command
+    # line. Nothing is added to the prompt; the grader stops asking a
+    # question the agent was never given the means to answer.
+    if task.get("grader") == "cli":
+        from adherence.cligrade import grade_cli
+        repo = task.get("repo") or ""
+        merge = task.get("merge_commit", "")
+        if not repo or not merge:
+            checks.append(skip("cli.surface",
+                               "task marked cli-graded but carries no repo "
+                               "mirror or merge commit"))
+            return checks
+        mirror = Path(repo)
+        if not mirror.is_absolute():
+            from adherence import REPO_ROOT
+            mirror = REPO_ROOT / mirror
+        checks += grade_cli(sandbox, mirror, merge,
+                            task.get("code_files") or [])
+        return checks
+
     # --- the maintainers' own tests decide it -------------------------
     test_files = task.get("test_files") or []
     merge = task.get("merge_commit", "")

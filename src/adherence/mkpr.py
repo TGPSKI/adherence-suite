@@ -241,13 +241,17 @@ def verify(mirror: Path, parent: str, merge: str, test_files: list[str],
                 return False, "tests already pass at the parent commit"
             invented = names_the_test_requires(red.stdout + red.stderr)
             if invented:
-                return False, (
-                    f"unpassable by construction: the PR's tests do not "
-                    f"compile at the parent because they name "
-                    f"{', '.join(invented[:4])}, which the fix introduces. "
-                    f"An agent can only pass by inventing that exact "
-                    f"identifier, so this measures name-guessing, not the "
-                    f"work")
+                # Not a broken task -- a task the UNIT grader cannot judge
+                # fairly. It is handed to the CLI grader instead, which
+                # compares against the merge commit's own binary at the
+                # command line, where the contract is the one the PR body
+                # already gave the agent. Recorded so the choice is on the
+                # record rather than in a heuristic nobody can see.
+                return True, ("cli-graded: the PR's tests name "
+                              + ", ".join(invented[:4])
+                              + ", which the fix introduces, so they cannot "
+                                "compile against any implementation that "
+                                "chose different identifiers")
             # The full post-fix state. Checking out `merge -- .` instead
             # would restore files the merge has but NOT remove files it
             # deleted, so a PR that deletes or renames a source file leaves
@@ -382,14 +386,23 @@ def main():
             drop(n, why)
             continue
 
+        # Which grader can judge this task fairly. `verify` says so: a
+        # task whose tests do not compile at the parent because they name
+        # what the fix introduces cannot be judged by those tests against
+        # an agent that chose different identifiers.
+        cli_graded = why.startswith("cli-graded:")
         keep({
             "pr": n, "ecosystem": kind, "title": pr["title"], "base_commit": pr["base"]["sha"],
             "merge_commit": pr["merge_commit_sha"], "prompt": prompt,
             "test_files": tests, "test_cmd": eco["test_cmd"](pkgs),
             "code_files": code, "additions": pr.get("additions", 0),
             "verified": why,
+            "grader": "cli" if cli_graded else "unit",
+            "invented_symbols": (names_the_test_requires(why)
+                                 if cli_graded else []),
         })
-        print(f"  kept #{n} (+{pr.get('additions',0)}) {pr['title'][:56]}",
+        print(f"  kept #{n} (+{pr.get('additions',0)}) "
+              f"[{'cli' if cli_graded else 'unit'}] {pr['title'][:52]}",
               file=sys.stderr)
 
     gt_f.close()

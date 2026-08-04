@@ -1134,7 +1134,10 @@ class SuiteTui(TuiApp):
                 return False
             if key in (ord(" "), 10, 13):
                 # Each table opens its own kind of detail: a live run, a
-                # graded result, or the cell's distribution.
+                # graded result, or the cell's distribution. Left/right at
+                # this level move between sections, so descending is
+                # [space]/[enter] only -- binding right to both would make
+                # section-switching unreachable.
                 if self.live_section == 0 and self.live:
                     self.detail = True
                     self.act_cursor = self.act_scroll = 0
@@ -1149,6 +1152,10 @@ class SuiteTui(TuiApp):
                     return True          # Q quits from any depth
                 if key == 27:            # esc: all the way out
                     self.act_open = self.detail = False
+                    self.act_scroll = 0
+                    return False
+                if key == C.KEY_LEFT:    # left: up one level
+                    self.act_open = False
                     self.act_scroll = 0
                     return False
                 if key in (ord(" "), 10, 13, ord("q")):
@@ -1174,12 +1181,16 @@ class SuiteTui(TuiApp):
                 self.act_cursor = max(0, self.act_cursor + step)
                 self.act_sel = ""        # resolved from the index next draw
                 return False
-            if key in (ord(" "), 10, 13):
+            if key in (ord(" "), 10, 13, C.KEY_RIGHT):
                 # Expanding pins the selection unconditionally. Reading one
                 # event while the list follows the newest is how the thing
                 # you opened disappears mid-sentence.
                 self.act_open, self.act_scroll = True, 0
                 self.act_follow = False
+                return False
+            if key == C.KEY_LEFT:        # left: back to the run list
+                self.detail = False
+                self.act_cursor = self.act_scroll = 0
                 return False
             if key == ord("Q"):
                 return True
