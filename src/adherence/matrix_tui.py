@@ -374,9 +374,10 @@ class SuiteTui(TuiApp):
 
     def render(self, max_y, max_x):
         self.header(max_x)
-        # -1 more than the chrome strictly needs: a blank row above the
-        # legend, so the last line of content does not read as part of it.
-        body = max_y - 4
+        # Two rows more than the chrome needs: one for the scrolling
+        # section's range indicator, one blank, so neither the last row of
+        # content nor the "N of M" line sits flush against the legend.
+        body = max_y - 5
         if self.picking:
             total, avail = self.view_picker(body, max_x)
             self.footer(max_y, max_x, total, avail)
@@ -652,9 +653,9 @@ class SuiteTui(TuiApp):
                             + ("  ◀" if self.live_section == 2 else ""),
                       C.color_pair(5) if self.live_section == 2 else C.A_BOLD)
             y += 1
-            self._put(y, 1, f"{'scenario':<20}{'arm':>4}{'t':>3}{'verdict':>9}"
-                            f"{'calls':>7}{'tok_in':>12}{'dur':>9}  failing",
-                      C.A_DIM)
+            self._put(y, 1, f"{'scenario':<20}{'arm':>4}{'t':>3}"
+                            f"{'verdict':>13}{'calls':>7}{'tok_in':>12}"
+                            f"{'dur':>9}  failing", C.A_DIM)
             y += 1
             self.graded_cursor = max(0, min(self.graded_cursor,
                                             len(recent) - 1))
@@ -685,12 +686,12 @@ class SuiteTui(TuiApp):
                 self._put(y, 1, f"{r['scenario'][:19]:<20}", hl)
                 self._put(y, 21, f"{r.get('arm', '-'):>4}", C.A_DIM)
                 self._put(y, 25, f"{r['trial']:>3}", C.A_DIM)
-                self._put(y, 28, f"{verdict:>9}", col)
-                self._put(y, 37, f"{m.get('calls', 0):>7}", C.A_DIM)
-                self._put(y, 44, f"{m.get('tok_in_billed', 0):>12,}", C.A_DIM)
-                self._put(y, 56, f"{lv.fmt_age(r.get('duration_s', 0)):>9}",
+                self._put(y, 28, f"{verdict:>13}", col)
+                self._put(y, 41, f"{m.get('calls', 0):>7}", C.A_DIM)
+                self._put(y, 48, f"{m.get('tok_in_billed', 0):>12,}", C.A_DIM)
+                self._put(y, 60, f"{lv.fmt_age(r.get('duration_s', 0)):>9}",
                           C.A_DIM)
-                self._put(y, 67, fails[:max(0, max_x - 69)], C.A_DIM)
+                self._put(y, 71, fails[:max(0, max_x - 73)], C.A_DIM)
                 y += 1
             if len(recent) > rows_g:
                 self.scrollbar(top_g, rows_g, max_x - 2, len(recent),
