@@ -81,13 +81,76 @@ def gh_json(path: str):
         return None
 
 
-def packages_for(paths: list[str]) -> list[str]:
-    """Go packages touched by the tests, as `./dir/...` targets."""
-    dirs = sorted({str(Path(p).parent) for p in paths if p.endswith("_test.go")})
-    return [f"./{d}/..." for d in dirs if d and d != "."]
+# Per-ecosystem knowledge, in one table so a new fixture language is a
+# data change rather than a rewrite. `verified` marks the ones actually
+# exercised end to end -- the others are declared, not proven, and mkpr
+# says so rather than implying support it has not demonstrated.
+ECOSYSTEMS = {
+    "go": {
+        "marker": "go.mod",
+        "is_test": lambda p: p.endswith("_test.go"),
+        "is_code": lambda p: p.endswith(".go") and not p.endswith("_test.go"),
+        "targets": lambda dirs: [f"./{d}/..." for d in dirs],
+        "test_cmd": lambda t: "go test " + " ".join(t),
+        "warm": ["go", "mod", "download", "all"],
+        "path_roots": ("pkg", "internal", "cmd", "api"),
+        "verified": True,
+    },
+    "rust": {
+        "marker": "Cargo.toml",
+        "is_test": lambda p: p.startswith("tests/") and p.endswith(".rs"),
+        "is_code": lambda p: p.endswith(".rs") and not p.startswith("tests/"),
+        "targets": lambda dirs: [],
+        "test_cmd": lambda t: "cargo test",
+        "warm": ["cargo", "fetch"],
+        "path_roots": ("src", "crates", "tests"),
+        "verified": False,
+    },
+    "python": {
+        "marker": "pyproject.toml",
+        "is_test": lambda p: (Path(p).name.startswith("test_")
+                              or p.endswith("_test.py")) and p.endswith(".py"),
+        "is_code": lambda p: p.endswith(".py") and not (
+            Path(p).name.startswith("test_") or p.endswith("_test.py")),
+        "targets": lambda dirs: sorted(dirs),
+        "test_cmd": lambda t: "python -m pytest -q " + " ".join(t),
+        "warm": ["python", "-m", "pip", "download", "-d", ".pipcache", "."],
+        "path_roots": ("src", "lib", "tests"),
+        "verified": False,
+    },
+    "node": {
+        "marker": "package.json",
+        "is_test": lambda p: (".test." in p or ".spec." in p) and p.endswith(
+            (".js", ".ts", ".tsx", ".jsx")),
+        "is_code": lambda p: p.endswith((".js", ".ts", ".tsx", ".jsx"))
+                   and not (".test." in p or ".spec." in p),
+        "targets": lambda dirs: sorted(dirs),
+        "test_cmd": lambda t: "npm test --",
+        "warm": ["npm", "ci", "--ignore-scripts"],
+        "path_roots": ("src", "lib", "packages"),
+        "verified": False,
+    },
+}
 
 
-def warm_at(d: str, env: dict) -> None:
+def detect_ecosystem(mirror: Path, commit: str) -> str:
+    """Which ecosystem, from the marker file at the commit under test."""
+    r = subprocess.run(["git", "ls-tree", "--name-only", commit],
+                       cwd=mirror, capture_output=True, text=True)
+    names = set(r.stdout.split())
+    for key, eco in ECOSYSTEMS.items():
+        if eco["marker"] in names:
+            return key
+    return ""
+
+
+def packages_for(paths: list[str], eco: dict) -> list[str]:
+    """Test targets for the directories the PR's tests touch."""
+    dirs = sorted({str(Path(p).parent) for p in paths if eco["is_test"](p)})
+    return eco["targets"]([d for d in dirs if d and d != "."])
+
+
+def warm_at(d: str, env: dict, eco: dict | None = None) -> None:
     """Populate the shared module cache for THIS commit, with network.
 
     Measured on cli/cli: 125 lines of go.mod/go.sum drift between HEAD and
@@ -104,12 +167,13 @@ def warm_at(d: str, env: dict) -> None:
     online = {k: v for k, v in env.items()
               if k not in ("GOPROXY", "GOFLAGS", "GOTOOLCHAIN")}
     online["GOFLAGS"] = "-mod=mod"
-    subprocess.run(["go", "mod", "download", "all"], cwd=d, env=online,
+    cmd = (eco or ECOSYSTEMS["go"])["warm"]
+    subprocess.run(cmd, cwd=d, env=online,
                    capture_output=True, text=True, timeout=1800)
 
 
 def verify(mirror: Path, parent: str, merge: str, test_files: list[str],
-           pkgs: list[str], env: dict) -> tuple[bool, str]:
+           pkgs: list[str], env: dict, eco: dict) -> tuple[bool, str]:
     """Fail-before / pass-after, without a model.
 
     A task that does not go red at the parent commit is not measuring the
@@ -122,18 +186,24 @@ def verify(mirror: Path, parent: str, merge: str, test_files: list[str],
                 "--no-checkout", str(mirror), d])
             sh(["git", "checkout", "--detach", "--quiet", parent], cwd=d)
             # Dependencies for THIS commit, before anything runs offline.
-            warm_at(d, env)
+            warm_at(d, env, eco)
             # the PR's tests, on the pre-fix tree
             sh(["git", "checkout", merge, "--"] + test_files, cwd=d)
-            red = subprocess.run(["go", "test", *pkgs], cwd=d, env=env,
+            cmd = eco["test_cmd"](pkgs)
+            red = subprocess.run(cmd, shell=True, cwd=d, env=env,
                                  capture_output=True, text=True, timeout=900)
             if red.returncode == 0:
                 return False, "tests already pass at the parent commit"
-            # now the real fix as well -- and its own dependency state,
-            # since the merge commit may move go.mod
-            sh(["git", "checkout", merge, "--", "."], cwd=d)
-            warm_at(d, env)
-            green = subprocess.run(["go", "test", *pkgs], cwd=d, env=env,
+            # The full post-fix state. Checking out `merge -- .` instead
+            # would restore files the merge has but NOT remove files it
+            # deleted, so a PR that deletes or renames a source file leaves
+            # the old one behind -- duplicate declarations, a compile error,
+            # and a task dropped as "tests still fail with the real fix".
+            # Same failure class as a cold cache: a harness defect wearing
+            # the costume of an ungradeable task.
+            sh(["git", "checkout", "--detach", "--quiet", merge], cwd=d)
+            warm_at(d, env, eco)
+            green = subprocess.run(cmd, shell=True, cwd=d, env=env,
                                    capture_output=True, text=True, timeout=900)
             if green.returncode != 0:
                 return False, f"tests still fail with the real fix: " \
@@ -154,9 +224,16 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--no-verify", action="store_true",
-                    help="extract without the fail-before/pass-after check "
-                         "(faster, but the tasks are unproven)")
+                    help="DANGEROUS: skip the fail-before/pass-after check. "
+                         "An unverified task whose tests already pass at the "
+                         "parent commit is scored as a success for an agent "
+                         "that did nothing. Only for a fast dry run")
     args = ap.parse_args()
+    if args.no_verify:
+        print("WARNING: --no-verify. Tasks will NOT be proven to fail at the "
+              "parent commit, so a task whose tests already pass scores an "
+              "agent that did nothing as a success. Do not run a grid on "
+              "this output.", file=sys.stderr)
 
     mirror, out = Path(args.mirror).resolve(), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -171,6 +248,34 @@ def main():
         nums += [i["number"] for i in d["items"]]
     print(f"{len(nums)} merged PRs in {window}", file=sys.stderr)
 
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=mirror,
+                          capture_output=True, text=True).stdout.strip()
+    kind = detect_ecosystem(mirror, head)
+    if not kind:
+        sys.exit(f"no ecosystem marker at {head[:10]} — expected one of: "
+                 + ", ".join(e["marker"] for e in ECOSYSTEMS.values()))
+    eco = ECOSYSTEMS[kind]
+    print(f"ecosystem: {kind}", file=sys.stderr)
+    if not eco["verified"]:
+        print(f"WARNING: the '{kind}' adapter is declared but has never been "
+              f"exercised end to end. Run with --limit 3 first and read "
+              f"dropped.jsonl: an adapter bug looks exactly like an "
+              f"ungradeable task, which is how a good fixture gets thrown "
+              f"away.", file=sys.stderr)
+
+    # Resume: verification costs two full test runs plus a network warm per
+    # task, so re-running 174 PRs to recover from an interruption is real
+    # money. Anything already decided is kept.
+    done = {}
+    for name in ("ground-truth.jsonl", "dropped.jsonl"):
+        f = out / name
+        if f.is_file():
+            for line in f.read_text().splitlines():
+                if line.strip():
+                    done[json.loads(line)["pr"]] = name
+    if done:
+        print(f"resuming: {len(done)} PRs already decided", file=sys.stderr)
+
     env = dict(os.environ)
     cache = mirror.parent / f"{mirror.stem}.cache" / "gomod"
     if cache.is_dir():
@@ -178,51 +283,65 @@ def main():
                    GOPROXY="off", GOTOOLCHAIN="local")
 
     kept, dropped = [], []
+    gt_f = (out / "ground-truth.jsonl").open("a")
+    dr_f = (out / "dropped.jsonl").open("a")
+
+    def keep(rec):
+        kept.append(rec)
+        gt_f.write(json.dumps(rec) + "\n")
+        gt_f.flush()
+
+    def drop(n, why):
+        dropped.append((n, why))
+        dr_f.write(json.dumps({"pr": n, "reason": why}) + "\n")
+        dr_f.flush()
+
     for n in nums:
+        if n in done:
+            continue
         if args.limit and len(kept) >= args.limit:
             break
         pr = gh_json(f"repos/{args.repo}/pulls/{n}")
         files = gh_json(f"repos/{args.repo}/pulls/{n}/files?per_page=100")
         if not pr or not files:
-            dropped.append((n, "api"))
+            drop(n, "api")
             continue
         paths = [f["filename"] for f in files]
-        tests = [p for p in paths if p.endswith("_test.go")]
-        code = [p for p in paths if p.endswith(".go") and p not in tests]
+        tests = [p for p in paths if eco["is_test"](p)]
+        code = [p for p in paths if eco["is_code"](p)]
         if not tests or not code:
-            dropped.append((n, "no Go change with its own tests"))
+            drop(n, f"no {kind} change with its own tests")
             continue
 
         prompt = strip_paths(f"{pr['title']}\n\n{pr.get('body') or ''}")
         if leaks_path(prompt):
-            dropped.append((n, "prompt still names a path after stripping"))
+            drop(n, "prompt still names a path after stripping")
             continue
         if len(prompt) < 40:
-            dropped.append((n, "prompt too thin once stripped"))
+            drop(n, "prompt too thin once stripped")
             continue
 
-        pkgs = packages_for(tests)
+        pkgs = packages_for(tests, eco)
         ok, why = (True, "unverified") if args.no_verify else verify(
-            mirror, pr["base"]["sha"], pr["merge_commit_sha"], tests, pkgs, env)
+            mirror, pr["base"]["sha"], pr["merge_commit_sha"], tests, pkgs, env, eco)
         if not ok:
-            dropped.append((n, why))
+            drop(n, why)
             continue
 
-        kept.append({
-            "pr": n, "title": pr["title"], "base_commit": pr["base"]["sha"],
+        keep({
+            "pr": n, "ecosystem": kind, "title": pr["title"], "base_commit": pr["base"]["sha"],
             "merge_commit": pr["merge_commit_sha"], "prompt": prompt,
-            "test_files": tests, "test_cmd": "go test " + " ".join(pkgs),
+            "test_files": tests, "test_cmd": eco["test_cmd"](pkgs),
             "code_files": code, "additions": pr.get("additions", 0),
             "verified": why,
         })
         print(f"  kept #{n} (+{pr.get('additions',0)}) {pr['title'][:56]}",
               file=sys.stderr)
 
-    (out / "ground-truth.jsonl").write_text(
-        "".join(json.dumps(k) + "\n" for k in kept))
-    (out / "dropped.jsonl").write_text(
-        "".join(json.dumps({"pr": n, "reason": r}) + "\n" for n, r in dropped))
-    print(f"\nkept {len(kept)}, dropped {len(dropped)} -> {out}", file=sys.stderr)
+    gt_f.close()
+    dr_f.close()
+    print(f"\nDONE. kept {len(kept)}, dropped {len(dropped)} this run "
+          f"-> {out}", file=sys.stderr)
     print(f"every drop is recorded in {out/'dropped.jsonl'} with its reason",
           file=sys.stderr)
     return 0

@@ -55,9 +55,11 @@ def main():
     tasks = [json.loads(x) for x in gt.read_text().splitlines() if x.strip()]
     unverified = [t for t in tasks if t.get("verified") == "unverified"]
     if unverified:
-        print(f"WARNING: {len(unverified)} task(s) were never verified "
-              f"fail-before/pass-after. They can pass without the agent doing "
-              f"anything. Re-run mkpr without --no-verify.", file=sys.stderr)
+        sys.exit(f"refusing: {len(unverified)} of {len(tasks)} task(s) were "
+                 f"never verified fail-before/pass-after. Such a task can be "
+                 f"passed by an agent that did nothing, and it would enter "
+                 f"the grid indistinguishable from a real one. Re-run mkpr "
+                 f"without --no-verify.")
 
     prefix = args.prefix or args.fixture.replace("/", "-")
     out_root = Path(args.out)
