@@ -32,7 +32,13 @@ from adherence import suitedata as sd
 from adherence import tasks as tk
 from adherence.tui.framework import TuiApp, curses_main
 
-VIEWS = ("live", "tasks", "design", "cells", "arms", "cost", "calib")
+# Run data first, then the reference pages. They are separated in the tab
+# bar because they answer different questions: everything left of the
+# divider changes as the grid runs, everything right of it is ground truth
+# that does not move, and mixing them invites reading a static table as a
+# live one.
+VIEWS = ("live", "cells", "arms", "cost", "calib", "tasks", "design")
+REFERENCE_FROM = VIEWS.index("tasks")
 VIEW_HELP = {
     "live": "running · graded · per arm×scenario   [h/l] section  "
             "[j/k] row  [space] detail",
@@ -273,6 +279,9 @@ class SuiteTui(TuiApp):
         self._put(0, 1, "adherence-suite", C.A_BOLD)
         x = 17
         for i, name in enumerate(VIEWS):
+            if i == REFERENCE_FROM:
+                self._put(0, x, " │ ", C.A_DIM)
+                x += 3
             attr = C.color_pair(5) if i == self.view else C.A_DIM
             self._put(0, x, f" {name} ", attr)
             x += len(name) + 3
