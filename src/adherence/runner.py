@@ -327,7 +327,13 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
                 pass
         checks = [c.d() for c in load_grader(scen_dir).grade(sandbox, transcript, final)]
     else:
-        checks = [gradelib.bad("adapter", adapter_err).d()]
+        # docs/EVAL.md exclusion criterion 1: "the harness did not complete a
+        # run. Not a model result." Grading this `fail` made it exactly that
+        # -- all_pass went False and every downstream pass rate counted a
+        # harness fault against the model. `ungradeable` is the status the
+        # design reserves for a harness gap, so the row can be excluded and
+        # counted instead of silently scored.
+        checks = [gradelib.skip("adapter", adapter_err).d()]
 
     usage = next((e for e in transcript if e.get("type") == schema.USAGE), {})
     result = schema.result(
@@ -355,6 +361,7 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
         provenance=provenance(scen_dir, meta, arm, arms_dir, adapter, harness),
         fixture=str(meta.get("fixture", "")),
         purpose=purpose,
+        schema_errors=schema_errs,
     )
     if not keep:
         shutil.rmtree(sandbox, ignore_errors=True)

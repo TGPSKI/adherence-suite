@@ -98,6 +98,13 @@ _RESULT_OPTIONAL = {
     # explicit, never inferred from the scenario id -- analyze.F5 refuses
     # without it, because one point has no slope
     "fixture": str,
+    # Transcript validation failures for this trial. Exclusion criterion 2
+    # drops a row whose transcript did not validate, because its cost
+    # figures are untrustworthy -- but the errors used to go only to
+    # stderr, so the criterion could not be applied to results.jsonl at
+    # all. An exclusion rule that cannot read its own evidence is not a
+    # rule. Empty list means validated clean.
+    "schema_errors": list,
 }
 
 # Fields a provenance block must carry for a stranger to reconstruct the
@@ -184,7 +191,8 @@ def result(scenario: str, category: str, model: str, adapter: str, arm: str,
            completion_tokens: int, checks: list, all_pass: bool,
            sandbox: str = "", out_dir: str = "",
            metrics: dict | None = None, provenance: dict | None = None,
-           fixture: str = "", purpose: str = "validation") -> dict:
+           fixture: str = "", purpose: str = "validation",
+           schema_errors: list | None = None) -> dict:
     r = {
         "scenario": scenario, "category": category, "model": model,
         "adapter": adapter, "arm": arm, "trial": int(trial),
@@ -200,6 +208,10 @@ def result(scenario: str, category: str, model: str, adapter: str, arm: str,
     if fixture:
         r["fixture"] = fixture
     r["purpose"] = purpose
+    # Always present, so "no schema_errors key" means an old record rather
+    # than a clean one -- exclusion criterion 2 must be able to tell those
+    # apart before it trusts a row.
+    r["schema_errors"] = list(schema_errors or [])
     return r
 
 
@@ -239,11 +251,39 @@ def validate_event(e: dict, where: str = "event") -> list[str]:
     return errs
 
 
+def _seq_break(ss: list) -> int | None:
+    """Index of the first call.seq that is neither `previous + 1` nor a
+    restart at 0. None if the run is well-formed.
+
+    The invariant exists so cost metrics can be trusted: a *gap* means a
+    call was dropped from the stream and its tokens are missing from every
+    total. What it must not do is reject a correct transcript. Agents are
+    keyed by name, and the same subagent name can be spawned more than once
+    in a session -- a second `explore` opens its own 0-based run, so the
+    concatenation reads [0,1,2,3,0,1]. Requiring one flat 0..n-1 run per
+    name called that a schema violation, which failed the whole trial as if
+    the model had erred. Restarts are legitimate and accepted; gaps (0,1,3)
+    and stalled repeats (0,1,1) are still caught, which is the dropped-call
+    case the invariant was written for.
+    """
+    prev = None
+    for i, s in enumerate(ss):
+        if not isinstance(s, int):
+            return i
+        if prev is None:
+            if s != 0:
+                return i
+        elif s != prev + 1 and s != 0:
+            return i
+        prev = s
+    return None
+
+
 def validate_transcript(events: list) -> list[str]:
     """Per-event field validation plus the cross-event invariants that
-    make the cost metrics meaningful: call sequence numbers are dense and
-    monotonic per agent, and a transcript claiming call_events actually
-    carries some."""
+    make the cost metrics meaningful: call sequence numbers advance without
+    gaps per agent, and a transcript claiming call_events actually carries
+    some."""
     errs: list[str] = []
     for i, e in enumerate(events):
         errs += validate_event(e, f"event[{i}]")
@@ -253,9 +293,11 @@ def validate_transcript(events: list) -> list[str]:
         if isinstance(e, dict) and e.get("type") == CALL:
             seqs.setdefault(e.get("agent", ROOT_AGENT), []).append(e.get("seq"))
     for agent, ss in seqs.items():
-        if ss != list(range(len(ss))):
+        bad = _seq_break(ss)
+        if bad is not None:
             errs.append(f"call.seq for agent {agent!r} is {ss}, "
-                        f"expected 0..{len(ss)-1} in order")
+                        f"breaks at index {bad} (each call must be the "
+                        f"previous +1, or 0 to open a new spawn)")
 
     cap = next((e for e in events
                 if isinstance(e, dict) and e.get("type") == CAPABILITY), None)
@@ -347,6 +389,22 @@ def _selfcheck() -> int:
     gap = [call(seq=0, input_tokens=1, output_tokens=1),
            call(seq=2, input_tokens=1, output_tokens=1)]
     expect("rejects seq gap", validate_transcript(gap), False)
+
+    # The same subagent name spawned twice opens a second 0-based run. A
+    # correct transcript; rejecting it failed the trial as a model error.
+    respawn = [call(seq=n, input_tokens=1, output_tokens=1, agent="explore")
+               for n in (0, 1, 2, 3, 0, 1)]
+    expect("accepts subagent respawn", validate_transcript(respawn), True)
+
+    # ...but a stalled counter is still a dropped call, not a respawn.
+    stalled = [call(seq=n, input_tokens=1, output_tokens=1, agent="explore")
+               for n in (0, 1, 1)]
+    expect("rejects stalled seq", validate_transcript(stalled), False)
+
+    # A respawn resets to 0; resuming mid-run is a gap by another name.
+    resumed = [call(seq=n, input_tokens=1, output_tokens=1, agent="explore")
+               for n in (0, 1, 2, 1)]
+    expect("rejects mid-run resume", validate_transcript(resumed), False)
 
     claims = [capability(True, call_events=True)]
     expect("rejects empty call_events claim", validate_transcript(claims), False)

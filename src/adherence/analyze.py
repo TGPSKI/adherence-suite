@@ -173,6 +173,47 @@ def experiment_rows(rows) -> tuple[list[dict], int]:
     return keep, len(rows) - len(keep)
 
 
+def harness_excluded(rows) -> tuple[list[dict], dict]:
+    """docs/EVAL.md exclusion criteria 1 and 2, applied and counted.
+
+    1. **Adapter failure** — the harness did not complete a run. Not a model
+       result, so it must not enter a pass-rate denominator as one.
+    2. **Schema violation** — the transcript did not validate, so its cost
+       figures are untrustworthy.
+
+    Both were registered and neither was implemented: an adapter fault was
+    graded `fail`, which reads downstream as a model that failed the task,
+    and schema errors went to stderr and were never written to the record.
+    The validation grid produced four such rows in 210 — about 2%, skewed
+    toward the arms that spawn subagents, because the specific fault was a
+    respawned subagent tripping the call.seq invariant. Two percent of the
+    primary outcome, pointed at the treatment, from a harness bug.
+
+    A row is dropped, never silently: the counts are returned for the
+    report, because an exclusion nobody can see is indistinguishable from
+    data that never existed.
+    """
+    keep, counts = [], {"adapter": 0, "schema": 0, "no_schema_field": 0}
+    for r in rows:
+        adapter_bad = any(c.get("name") == "adapter" and c.get("status") != "pass"
+                          for c in r.get("checks", []))
+        errs = r.get("schema_errors")
+        if errs is None:
+            # Predates the field. Cannot be confirmed clean, and criterion 2
+            # is about untrustworthy numbers -- so it is reported, not
+            # dropped, and the reader decides.
+            counts["no_schema_field"] += 1
+            errs = []
+        if adapter_bad:
+            counts["adapter"] += 1
+            continue
+        if errs:
+            counts["schema"] += 1
+            continue
+        keep.append(r)
+    return keep, counts
+
+
 def evaluate(rows) -> dict:
     """Every falsifier, with an explicit NOT TESTABLE where a precondition
     is missing. A verdict of 'not tripped' from a test that never ran is
@@ -346,6 +387,20 @@ def main():
     if not rows:
         print("no rows marked purpose=experiment. These are validation runs; "
               "the registered analysis does not read them.", file=sys.stderr)
+        return 1
+    rows, ex = harness_excluded(rows)
+    if ex["adapter"] or ex["schema"]:
+        print(f"excluded {ex['adapter']} row(s) for adapter failure and "
+              f"{ex['schema']} for schema violation "
+              f"(docs/EVAL.md exclusion criteria 1-2): harness faults, "
+              f"not model results", file=sys.stderr)
+    if ex["no_schema_field"]:
+        print(f"warning: {ex['no_schema_field']} row(s) carry no "
+              f"schema_errors field and predate exclusion criterion 2; "
+              f"they cannot be confirmed clean", file=sys.stderr)
+    if not rows:
+        print("every row was excluded as a harness fault. There is no model "
+              "result here to analyse.", file=sys.stderr)
         return 1
     F = evaluate(rows)
     print(json.dumps(F, indent=2) if args.json else render(F))

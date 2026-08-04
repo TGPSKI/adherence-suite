@@ -487,6 +487,63 @@ def check_purpose_isolation() -> list[str]:
     return problems
 
 
+def check_harness_exclusion() -> list[str]:
+    """A harness fault must never be scored as a model failure.
+
+    This is the distinction the whole design rests on: `ungradeable` means
+    the harness could not answer, `fail` means the model got it wrong. The
+    validation grid found the runner grading an adapter fault as `fail`, so
+    2% of rows entered the pass-rate denominator as model failures -- and
+    because the underlying bug was a respawned subagent tripping the
+    call.seq invariant, they skewed toward the arms that spawn subagents.
+    A harness bug pointed at the treatment is the worst kind."""
+    problems = []
+
+    def row(**kw):
+        r = {"scenario": "s1", "arm": "a3", "all_pass": True, "trial": 0,
+             "model": "m", "adapter": "a", "checks": [], "metrics": {},
+             "purpose": "experiment", "schema_errors": []}
+        r.update(kw)
+        return r
+
+    good = row()
+    adapter_fault = row(checks=[{"name": "adapter", "status": "ungradeable",
+                                 "evidence": "adapter timeout after 900s"}],
+                        all_pass=False)
+    schema_bad = row(schema_errors=["call.seq for agent 'explore' ..."])
+    keep, ex = analyze.harness_excluded([good, adapter_fault, schema_bad])
+    if len(keep) != 1:
+        problems.append(f"harness_excluded kept {len(keep)} of 3; expected 1")
+    if ex["adapter"] != 1 or ex["schema"] != 1:
+        problems.append(f"exclusion counts {ex}; expected one of each. An "
+                        f"exclusion nobody can count is invisible")
+
+    # The old shape: adapter fault graded `fail`. It must still be caught,
+    # so re-analysing an existing file does not silently score it.
+    legacy = row(checks=[{"name": "adapter", "status": "fail",
+                          "evidence": "boom"}], all_pass=False)
+    if analyze.harness_excluded([legacy])[1]["adapter"] != 1:
+        problems.append("an adapter check graded `fail` was not excluded; "
+                        "records written before the fix would still be "
+                        "scored as model failures")
+
+    # A run that genuinely failed the task is a model result and must stay.
+    real_fail = row(checks=[{"name": "pr.task_pass", "status": "fail",
+                             "evidence": "tests failed"}], all_pass=False)
+    if len(analyze.harness_excluded([real_fail])[0]) != 1:
+        problems.append("a genuine task failure was excluded as a harness "
+                        "fault; that discards the result the eval is for")
+
+    # And the runner must produce the ungradeable shape in the first place.
+    if schema.result(scenario="s", category="c", model="m", adapter="a",
+                     arm="a3", trial=0, duration_s=1.0, prompt_tokens=0,
+                     completion_tokens=0, checks=[], all_pass=False
+                     ).get("schema_errors") is None:
+        problems.append("schema.result omitted schema_errors; exclusion "
+                        "criterion 2 cannot read its own evidence")
+    return problems
+
+
 def check_analysis() -> list[str]:
     """The pre-specified analysis (docs/EVAL.md) must detect a planted
     effect, stay silent when there is none, and REFUSE when a precondition
@@ -589,46 +646,30 @@ def check_analysis() -> list[str]:
     return problems
 
 
+# Every non-scenario check, in run order. A list rather than a run of
+# copy-pasted blocks and a hand-maintained total: the count used to be
+# `len(ACTORS) + 5` with a comment naming four things, so adding a check
+# left the scoreboard reporting a number that was no longer what it ran.
+# A selftest that miscounts itself is the one test nobody audits.
+CHECKS = (
+    ("validation/experiment isolation", check_purpose_isolation),
+    ("harness fault is not a model failure", check_harness_exclusion),
+    ("pre-specified analysis", check_analysis),
+    ("stdlib test runner", check_test_runner),
+    ("fixture noise filter", check_noise_filter),
+    ("cost metrics", check_cost_metrics),
+)
+
+
 def main():
     failures = 0
-    purpose_problems = check_purpose_isolation()
-    print("OK  validation/experiment isolation" if not purpose_problems
-          else "BAD validation/experiment isolation")
-    for p in purpose_problems:
-        print(f"      {p}")
-    if purpose_problems:
-        failures += 1
-
-    analysis_problems = check_analysis()
-    print("OK  pre-specified analysis" if not analysis_problems
-          else "BAD pre-specified analysis")
-    for p in analysis_problems:
-        print(f"      {p}")
-    if analysis_problems:
-        failures += 1
-
-    runner_problems = check_test_runner()
-    print("OK  stdlib test runner" if not runner_problems
-          else "BAD stdlib test runner")
-    for p in runner_problems:
-        print(f"      {p}")
-    if runner_problems:
-        failures += 1
-
-    noise_problems = check_noise_filter()
-    print("OK  fixture noise filter" if not noise_problems
-          else "BAD fixture noise filter")
-    for p in noise_problems:
-        print(f"      {p}")
-    if noise_problems:
-        failures += 1
-
-    cost_problems = check_cost_metrics()
-    print("OK  cost metrics" if not cost_problems else "BAD cost metrics")
-    for p in cost_problems:
-        print(f"      {p}")
-    if cost_problems:
-        failures += 1
+    for label, fn in CHECKS:
+        problems = fn()
+        print(f"{'OK ' if not problems else 'BAD'} {label}")
+        for p in problems:
+            print(f"      {p}")
+        if problems:
+            failures += 1
 
     for sid in sorted(ACTORS):
         p, pc, pe = run_actor(sid, "pass")
@@ -646,8 +687,7 @@ def main():
                     print(f"      compliant tripped: {c.name}: {c.evidence}")
         if f:
             print(f"      violator evaded: {[c.name for c in fc]}")
-    n = len(ACTORS) + 5   # scenarios + cost metrics + noise filter
-                          # + test runner + pre-specified analysis
+    n = len(ACTORS) + len(CHECKS)
     print(f"\nselftest: {n-failures}/{n} checks healthy")
     sys.exit(1 if failures else 0)
 

@@ -282,9 +282,9 @@ A trial or scenario is excluded only for a reason on this list, and every
 exclusion is counted in the report:
 
 1. **Adapter failure** — the harness did not complete a run (`adapter` check
-   failed). Not a model result.
+   did not pass). Not a model result.
 2. **Schema violation** — the transcript failed validation, so its cost
-   figures are untrustworthy.
+   figures are untrustworthy. Recorded per row as `schema_errors`.
 3. **Calibration gate** — a scenario whose pooled pilot pass rate falls
    outside [0.25, 0.80]. Dropped scenarios are logged and **never
    re-authored to discriminate**.
@@ -296,6 +296,13 @@ exclusion is counted in the report:
 Not on the list, and therefore not permitted: excluding a trial for being an
 outlier, for a surprising result, or for a scenario turning out to favour the
 control.
+
+**Criteria 1 and 2 were registered and unimplemented until the validation
+grid.** An adapter fault was graded `fail`, which is indistinguishable
+downstream from a model that failed the task, and schema errors went to
+stderr and never reached the record — so criterion 2 could not read its own
+evidence. `adherence.analyze` now applies both and prints the counts.
+Writing an exclusion rule down is not the same as having one.
 
 ## Statistical plan
 
@@ -359,7 +366,7 @@ believable from the author of the tool.
 
 ## What measurement already contradicted
 
-Four premises this design was written on turned out to be wrong. They are
+Five premises this design was written on turned out to be wrong. They are
 recorded because a pre-registration that quietly absorbs its own corrections is
 not a pre-registration.
 
@@ -394,6 +401,19 @@ would mean call 1 carried something besides the instruction surface, and
 defend. **A3 starts 815 tokens per call *below* the practical control** — the
 directed router is smaller than the file it replaces, and any A3 cost above A1
 is exploration, not preamble.
+
+**A respawned subagent was a schema violation.** `validate_transcript`
+required each agent's `call.seq` to be one flat `0..n-1` run, keyed by agent
+*name*. The same subagent name can be spawned twice in a session, and the
+second spawn opens its own 0-based run — so a correct transcript reads
+`[0,1,2,3,0,1]` and was rejected. The adapter then exited non-zero, the
+runner graded that `fail`, and the trial counted as a model failure. Four of
+210 rows on the validation grid, ~2%, and the mechanism points at the
+treatment: the arms that route to subagents are the arms that spawn them
+twice. A harness bug correlated with the arm under test is the worst kind,
+and total-token comparisons would have carried it silently. Restarts are now
+accepted; gaps (`0,1,3`) and stalled counters (`0,1,1`) — the dropped-call
+case the invariant was actually written for — are still caught.
 
 **Subagent cost was invisible.** A dispatched subagent runs in its own session,
 and neither the root stream nor the root export contains one of its calls.
