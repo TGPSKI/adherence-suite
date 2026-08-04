@@ -83,8 +83,33 @@ _RESULT_REQUIRED = {
 }
 _RESULT_OPTIONAL = {
     "sandbox": str, "out_dir": str,
-    # derived cost metrics, computed by lib/metrics.py from call events
+    # derived cost metrics, computed by metrics.py from call events
     "metrics": dict,
+    # Enough to re-run this exact trial without trusting whoever produced
+    # it: the argv, the code, the harness, and hashes of the inputs.
+    # A result that cannot be replayed is a claim, not a measurement.
+    "provenance": dict,
+    # explicit, never inferred from the scenario id -- analyze.F5 refuses
+    # without it, because one point has no slope
+    "fixture": str,
+}
+
+# Fields a provenance block must carry for a stranger to reconstruct the
+# trial. Checked by validate_result, so a record cannot claim provenance
+# it does not have.
+_PROVENANCE_REQUIRED = {
+    "argv": list,          # the exact runner invocation
+    "suite_commit": str,   # code that produced it ("unknown" if not a repo)
+    "suite_dirty": bool,   # was the tree clean when it ran
+    "harness": str,        # adapter's own version string
+    "python": str,
+    "scenario_sha": str,   # scenario.yaml + prompt
+    "started_at": str,     # UTC ISO-8601
+}
+_PROVENANCE_OPTIONAL = {
+    "arm_sha": str,        # arm manifest + files
+    "base_commit": str,    # fixture checkout
+    "seed": int,
 }
 
 CHECK_STATUSES = ("pass", "fail", "ungradeable")
@@ -152,7 +177,8 @@ def result(scenario: str, category: str, model: str, adapter: str, arm: str,
            trial: int, duration_s: float, prompt_tokens: int,
            completion_tokens: int, checks: list, all_pass: bool,
            sandbox: str = "", out_dir: str = "",
-           metrics: dict | None = None) -> dict:
+           metrics: dict | None = None, provenance: dict | None = None,
+           fixture: str = "") -> dict:
     r = {
         "scenario": scenario, "category": category, "model": model,
         "adapter": adapter, "arm": arm, "trial": int(trial),
@@ -163,6 +189,10 @@ def result(scenario: str, category: str, model: str, adapter: str, arm: str,
     }
     if metrics is not None:
         r["metrics"] = metrics
+    if provenance is not None:
+        r["provenance"] = provenance
+    if fixture:
+        r["fixture"] = fixture
     return r
 
 
@@ -232,6 +262,10 @@ def validate_result(r: dict) -> list[str]:
         return ["result: not an object"]
     errs: list[str] = []
     _check_fields(r, _RESULT_REQUIRED, _RESULT_OPTIONAL, "result", errs)
+    prov = r.get("provenance")
+    if isinstance(prov, dict):
+        _check_fields(prov, _PROVENANCE_REQUIRED, _PROVENANCE_OPTIONAL,
+                      "result.provenance", errs)
     for i, c in enumerate(r.get("checks") or []):
         if not isinstance(c, dict):
             errs.append(f"result.checks[{i}]: not an object")
@@ -271,7 +305,12 @@ GOLDEN_RESULT = result(
              "evidence": "changed=['mathlib.py'] within allowed=['mathlib.py']"},
             {"name": "task", "status": "ungradeable",
              "evidence": "adapter emits no task events"}],
-    all_pass=True, metrics={"calls": 2, "tok_in_billed": 36050})
+    all_pass=True, metrics={"calls": 2, "tok_in_billed": 36050},
+    provenance={"argv": ["runner", "--only", "s12", "--arm", "a3"],
+                "suite_commit": "42eb1f1", "suite_dirty": False,
+                "harness": "opencode 1.18.10", "python": "3.14.6",
+                "scenario_sha": "9f2c1a4b", "arm_sha": "1de4c007",
+                "started_at": "2026-08-04T05:00:00Z"})
 
 
 def _selfcheck() -> int:

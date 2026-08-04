@@ -14,6 +14,7 @@ Stdlib only.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -24,6 +25,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 from adherence import REPO_ROOT, gradelib, metrics, schema
@@ -52,6 +54,69 @@ def load_yamlish(path: Path) -> dict:
                 cur_list = None
                 data[k] = int(v) if v.isdigit() else v.strip('"')
     return data
+
+
+def _sha8(*parts: str) -> str:
+    h = hashlib.sha256()
+    for p in parts:
+        h.update(p.encode("utf-8", "replace"))
+    return h.hexdigest()[:8]
+
+
+def _harness_version(adapter: Path) -> str:
+    """The adapter's own version string. Recorded because the stream format
+    this suite reads is a moving target; a cost number from an unknown
+    harness version is not reproducible."""
+    for probe in (["opencode", "--version"],):
+        try:
+            r = subprocess.run(probe, capture_output=True, text=True, timeout=10)
+            if r.returncode == 0 and r.stdout.strip():
+                return f"{probe[0]} {r.stdout.strip().splitlines()[0]}"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return f"unknown ({adapter.name})"
+
+
+def provenance(scen_dir: Path, meta: dict, arm: str, arms_dir, adapter: Path,
+               harness: str) -> dict:
+    """Everything a stranger needs to re-run this exact trial.
+
+    The replay invariant: a node is reconstructible by someone who does not
+    trust the author, from the record alone. Without this block a result is
+    a claim about a measurement, not the measurement."""
+    try:
+        rev = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=10)
+        commit = rev.stdout.strip() or "unknown"
+        st = subprocess.run(["git", "status", "--porcelain"], cwd=ROOT,
+                            capture_output=True, text=True, timeout=10)
+        dirty = bool(st.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        commit, dirty = "unknown", True
+
+    scen_yaml = (scen_dir / "scenario.yaml")
+    grade = (scen_dir / "grade.py")
+    prov = {
+        "argv": list(sys.argv),
+        "suite_commit": commit,
+        "suite_dirty": dirty,
+        "harness": harness,
+        "python": sys.version.split()[0],
+        # scenario.yaml carries the prompt; grade.py decides the verdict.
+        # Both must be pinned or "same scenario" means nothing.
+        "scenario_sha": _sha8(
+            scen_yaml.read_text() if scen_yaml.exists() else "",
+            grade.read_text() if grade.exists() else ""),
+        "started_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    if arms_dir and arm and arm != "-":
+        d = Path(arms_dir) / arm
+        if d.is_dir():
+            prov["arm_sha"] = _sha8(*(f.read_text(errors="replace")
+                                      for f in sorted(d.rglob("*")) if f.is_file()))
+    if meta.get("base_commit"):
+        prov["base_commit"] = str(meta["base_commit"])
+    return prov
 
 
 def proxy_mark(label: str, parallel: bool = False) -> None:
@@ -207,6 +272,7 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
     timeout = int(meta.get("timeout", 300))
     target_agent = meta.get("agent", "")
 
+    harness = _harness_version(adapter)
     env = dict(os.environ)
     if parallel:
         # Measured: concurrent `opencode run` against one XDG_DATA_HOME
@@ -265,6 +331,8 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
                                 duration_s=round(duration, 1),
                                 expects_edit=bool(int(
                                     meta.get("expects_edit", 1)))),
+        provenance=provenance(scen_dir, meta, arm, arms_dir, adapter, harness),
+        fixture=str(meta.get("fixture", "")),
     )
     if not keep:
         shutil.rmtree(sandbox, ignore_errors=True)

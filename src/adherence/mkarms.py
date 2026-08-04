@@ -94,15 +94,27 @@ def _blocks(repo: Path) -> list[tuple[str, str]]:
 
 
 def build_a2(repo: Path, seed: int) -> str:
-    """Router + all contexts concatenated, section order randomized per
-    trial (§12 confound 8: position effects). The router block is kept
-    first — a router buried in the middle of a monolith is a different
-    treatment, not a shuffled one."""
+    """Router + all contexts concatenated.
+
+    `seed=0` preserves source order — the closest thing to a monolith a
+    human would have written. Non-zero seeds randomize section order to
+    neutralize position effects.
+
+    Both exist because the randomization is not free: a randomly-ordered
+    monolith may be worse than any real one, which would let the treatment
+    win by the control being degraded rather than by bounding working. The
+    registration requires A2 at both orderings, and treats a large gap
+    between them as a finding about ordering that outranks the A2-vs-A3
+    comparison (docs/EVAL.md §The control may be handicapped).
+
+    The router block stays first either way — a router buried mid-document
+    is a different treatment, not a shuffled one."""
     blocks = _blocks(repo)
     if not blocks:
         return ""
     head, rest = blocks[0], blocks[1:]
-    random.Random(seed).shuffle(rest)
+    if seed:
+        random.Random(seed).shuffle(rest)
     parts = []
     for path, content in [head] + rest:
         parts.append(BEGIN.format(path=path))

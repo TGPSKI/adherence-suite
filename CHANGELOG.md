@@ -19,6 +19,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   missing, never "not tripped". `make analyze`.
 - `ruleset-prereg-tags-immutable.json` — `prereg-*` tags are immutable and
   signature-required, which is what makes the registration mean anything.
+- **Provenance on every result record** — argv, suite commit and dirty flag,
+  harness version, interpreter, and hashes of the scenario and the arm. A
+  result that cannot be re-run by someone who does not trust its author is a
+  claim about a measurement, not a measurement.
+- **Kill conditions now name successors.** Each falsifier registers the
+  explanation that survives its death and that explanation's own test, so the
+  follow-up cannot be chosen after seeing which way the result went.
+- **Claims carry the reasoning mode that earns them** (abduced / deduced /
+  induced) with a ceiling on how each may be stated. Every E-claim is
+  currently deduced; only the four contradicted premises are induced.
+- **A2 runs at both section orderings.** `--seed 0` now preserves the source
+  order instead of shuffling.
 
 - `make ci-local` — extracts CI's own `run:` blocks from the workflow file and
   executes them under the shell GitHub uses. Added after two broken steps

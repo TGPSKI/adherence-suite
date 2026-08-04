@@ -92,6 +92,22 @@ one.
 Efficiency claims are primary. Quality claims are guardrails — they exist to
 make the efficiency numbers interpretable, not as the headline.
 
+**Each claim carries the mode that currently earns it, and cannot be reported
+above that mode.** A prediction derived from how the system is built is not
+evidence that the system behaves that way, and presenting the two at equal
+confidence is the most common way a design like this misleads.
+
+| Mode | Meaning here | Ceiling on how it may be stated |
+|---|---|---|
+| **abduced** | proposed to explain a surprise; no test yet | "a candidate explanation" |
+| **deduced** | follows from the architecture; testable, untested | "the design predicts" |
+| **induced** | measured, with the trial recorded and replayable | "measured: …" |
+
+Today every E-claim is **deduced**. Nothing in the E series has been measured,
+and no sentence in this document may say otherwise until the grid runs. The
+four entries under *What measurement already contradicted* are the only
+**induced** results here — which is why they are the only ones stated as fact.
+
 | ID | Claim | Operationalized as |
 |---|---|---|
 | **E1** | Bounded contexts cost fewer input tokens per task | Marginal + total billed input tokens vs both monolith arms |
@@ -123,6 +139,26 @@ The efficiency claim is **not supported** if any of these hold:
 
 Tripping F5 or F6 while F1–F3 hold is the most likely realistic outcome, and is
 still publishable: it bounds where the pattern applies.
+
+### What each death names next
+
+A falsifier that only says "the claim is dead" wastes the most informative
+thing an experiment produces — *the manner* of the death. Each row below is
+registered now so the successor cannot be invented afterward to fit whatever
+happened.
+
+| If this trips | The surviving explanation | Its own test |
+|---|---|---|
+| **F1** marginal tokens not ≥20% under A2 | the saving is delivery-independent — what matters is total instruction bytes, not bounding | A5 (≈40 lines) vs A2 vs A3 on marginal tokens. If a small flat file matches bounded contexts, size is the variable and the router is decoration |
+| **F2** cache-adjusted within ±20% of A1 | caching subsumes bounding: the monolith's prefix is cached after turn 1, so the advantage is a cold-start artifact | per-turn cost curve in a multi-task session. If A3's advantage lives entirely on turn 1, confirmed |
+| **F3** calls don't fall, but F1 holds | the saving is per-call context size, not routing efficiency — the router doesn't reduce exploration, it reduces what each step costs | `probes_to_first_edit` should be statistically equal across arms while tokens-per-call differ |
+| **F4** pass rate drops ≥10pp | bounded contexts withhold information some tasks need | the drop must concentrate in the adversarial class. Uniform across classes means routing failure, not withholding — a different defect with a different fix |
+| **F5** no interaction with *N* | the effect tracks absolute instruction size, not partition count | re-express the effect against total instruction bytes rather than *N*; *N* and bytes are correlated and the eval has been attributing to the wrong one |
+| **F6** parent+child not lower than inline | spawning costs more than it saves because the child re-reads context the parent already held | child's first-call input vs the parent's context at dispatch. The overlap is the waste, and it is measurable directly |
+
+None of these successors are tested by this registration. They are named so
+that if a death occurs, the next experiment is already chosen and cannot be
+selected to suit the result.
 
 ## Arms
 
@@ -289,10 +325,30 @@ control.
 | Prompt caching | `tok_effective`; needs a metered API, not the local endpoint |
 | Cheapness via doing less | Success-conditioning, Pareto plane, `abandoned` flag |
 | Tokens vs calls move oppositely | F3 separates them; both reported |
-| Position effects | A2 section order randomized per trial |
+| Position effects | A2 section order randomized per trial — **but see below; this control may itself favour the treatment** |
 | Contamination | Post-cutoff PRs only; pre/post split; mutation pass |
 | Generation quality | Generation is part of the treatment: run once, freeze, commit the output. A bad context set is a result, not a bug to fix mid-run |
 | Harness capability skew | `ungradeable`, never `fail` |
+
+### The control may be handicapped, and that favours the treatment
+
+A2 randomizes section order per trial to neutralize position effects. That
+control has a cost nobody chose: **a randomly-ordered monolith may be worse
+than any monolith a human would actually write.** Related material gets
+scattered, and a model that would have followed a coherently-ordered document
+is handed an incoherent one. If A3 beats A2, one live explanation is not
+"bounding helps" but "we degraded the control".
+
+This is registered as a threat because it points the same direction as the
+hypothesis, which is the kind of bias that is invisible in a favourable
+result.
+
+Registered handling: **A2 runs at both orderings.** `mkarms --seed 0` produces
+the maintainer's own section order where one can be recovered from the source
+document; non-zero seeds randomize. If the two A2 variants differ by more than
+the F1 threshold on marginal tokens, **ordering is a bigger effect than
+bounding**, and that is the finding — reported ahead of any A2-vs-A3
+comparison, which becomes uninterpretable until it is settled.
 
 Because fixtures are foreign, the baseline is maintainer-written, tasks are
 maintainer-authored, correctness is graded by maintainer-written tests, token
