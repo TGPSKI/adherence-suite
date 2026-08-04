@@ -547,9 +547,8 @@ class SuiteTui(TuiApp):
             y += 1
             self._put(y, 1, f"{'arm/scenario':<24}{'done':>6}{'ung':>5}"
                             f"{'pass':>6}{'med tok':>11}{'p90 tok':>11}"
-                            f"{'calls':>7}{'tools':>7}{'sub':>5}"
-                            f"{'med dur':>9}{'p90 dur':>9}{'left':>5}"
-                            f"{'eta':>8}", C.A_DIM)
+                            f"{'calls':>7}{'tools':>7}{'sub':>5}{'abnd':>6}"
+                            f"{'med dur':>9}{'left':>5}{'eta':>8}", C.A_DIM)
             y += 1
             # Trials per cell, from the batch size when it is known.
             per_cell = 0
@@ -577,7 +576,11 @@ class SuiteTui(TuiApp):
                           C.color_pair(3) if c["ungradeable"] else C.A_DIM)
                 self._put(y, 36, f"{c['pass_rate']:>5.0f}%",
                           self.pass_attr(c["pass_rate"]))
-                self._put(y, 42, f"{c['tok']:>11,.0f}", C.color_pair(2))
+                skewed = (c["abandoned"] and c["tok_worked"]
+                          and c["tok_worked"] > c["tok"] * 1.05)
+                self._put(y, 42, f"{c['tok']:>11,.0f}"
+                          + ("*" if skewed else " "),
+                          C.color_pair(4) if skewed else C.color_pair(2))
                 # p90 in red when the tail is far past the middle: a median
                 # that halves while the tail doubles is not a saving.
                 tail = (c["p90_tok"] / c["tok"]) if c["tok"] else 0
@@ -587,11 +590,15 @@ class SuiteTui(TuiApp):
                 self._put(y, 71, f"{c['avg_tools']:>7.1f}", C.A_DIM)
                 self._put(y, 78, f"{c['n_subagents']:>5.0f}",
                           C.color_pair(3) if c["n_subagents"] else C.A_DIM)
-                self._put(y, 83, f"{lv.fmt_age(c['dur_s']):>9}", C.A_DIM)
-                self._put(y, 92, f"{lv.fmt_age(c['p90_dur']):>9}", C.A_DIM)
-                self._put(y, 101, f"{left:>5}" if per_cell else f"{'—':>5}",
+                # Abandons in red: they never pass, and they drag the
+                # median token count down, so a cheap-looking cell with
+                # abandons is not cheap.
+                self._put(y, 83, f"{c['abandoned']:>6}",
+                          C.color_pair(4) if c["abandoned"] else C.A_DIM)
+                self._put(y, 89, f"{lv.fmt_age(c['dur_s']):>9}", C.A_DIM)
+                self._put(y, 98, f"{left:>5}" if per_cell else f"{'—':>5}",
                           C.A_DIM)
-                self._put(y, 106, f"{lv.fmt_age(eta):>8}" if eta
+                self._put(y, 103, f"{lv.fmt_age(eta):>8}" if eta
                           else f"{'—':>8}", C.A_DIM)
                 y += 1
             if len(cells) > rows_s:
@@ -1450,6 +1457,11 @@ class SuiteTui(TuiApp):
             ("trials", f"{c['trials']}"),
             ("pass@1", f"{c['pass_rate']:.0f}%  (± {c['spread']:.0f})"),
             ("median tok_in | passed", f"{c['tok_won']:,.0f}"),
+            ("median tok_in | worked", f"{c['tok_worked']:,.0f}"
+                                       + ("   (abandoned trials excluded — "
+                                          "they never pass and spend a "
+                                          "fraction of a real attempt)"
+                                          if c["abandoned"] else "")),
             ("ungradeable (harness)", f"{c['ungradeable']}/{c['trials']}"),
             ("redundant reads", f"{c['redundant']:.0f}"),
             ("subagents dispatched", f"{c['n_subagents']:.0f} "

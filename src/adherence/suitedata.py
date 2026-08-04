@@ -179,6 +179,16 @@ def load_cells(paths=None, pattern=None):
             # the median is telling the whole story.
             "avg_tok": _avg(toks),
             "p90_tok": _p90(toks),
+            # Cost with the give-ups removed. An abandoned trial spends a
+            # fraction of a real attempt, so an arm that quits more often
+            # looks CHEAPER on the unconditioned median -- measured at 23%
+            # understatement for a1 on the validation grid, against the
+            # very arm the treatment is compared to. The registered
+            # analysis conditions on success; every surface that shows a
+            # raw median has to be able to say so too.
+            "tok_worked": _med([(r["metrics"] or {}).get("tok_in_billed", 0)
+                                for r in rs
+                                if not (r["metrics"] or {}).get("abandoned")]),
             "avg_calls": _avg(calls),
             "p90_calls": _p90(calls),
             "avg_dur": _avg([r.get("duration_s", 0) for r in rs]),
