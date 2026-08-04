@@ -96,6 +96,7 @@ class SuiteTui(TuiApp):
         self.proxy_path = proxy
         self.view = 0
         self.sort = 0
+        self.sort_desc = False
         self.editing = False
         self.buf = ""
         self.cursor = 0
@@ -278,13 +279,10 @@ class SuiteTui(TuiApp):
         for f, want in self.sel.items():
             if want:
                 cs = [c for c in cs if c[f] in want]
-        if SORTS[self.sort] == "pass":
-            cs = sorted(cs, key=lambda c: (-c["pass_rate"], c["tag"]))
-        elif SORTS[self.sort] == "tok":
-            cs = sorted(cs, key=lambda c: (-c["tok"], c["tag"]))
-        else:
-            cs = sorted(cs, key=lambda c: c["tag"])
-        return cs
+        keys = {"pass": lambda c: (c["pass_rate"], c["tag"]),
+                "tok": lambda c: (c["tok"], c["tag"]),
+                "tag": lambda c: c["tag"]}
+        return sorted(cs, key=keys[SORTS[self.sort]], reverse=self.sort_desc)
 
     # ---- chrome ----------------------------------------------------------
 
@@ -318,7 +316,7 @@ class SuiteTui(TuiApp):
         elif v == "live":
             sort = SECTIONS[self.live_section]
         else:
-            sort = SORTS[self.sort]
+            sort = f"{SORTS[self.sort]} {'v' if self.sort_desc else '^'}"
         tail = f"filter:{filt}  sort:{sort}  ref:{self.ref}"
         self._put(0, max(x + 2, max_x - len(tail) - 2), tail,
                   C.A_BOLD if self.editing else C.A_DIM)
@@ -1759,6 +1757,10 @@ class SuiteTui(TuiApp):
                 self.graded_desc = not self.graded_desc
             elif VIEWS[self.view] == "live" and self.live_section == 1:
                 self.sum_desc = not self.sum_desc
+            else:
+                # cells / arms / cost had no direction at all: [S] was
+                # advertised in the footer and did nothing outside live.
+                self.sort_desc = not self.sort_desc
         elif key == ord("s"):
             if VIEWS[self.view] == "tasks":
                 self.task_sort = (self.task_sort + 1) % len(TASK_SORTS)

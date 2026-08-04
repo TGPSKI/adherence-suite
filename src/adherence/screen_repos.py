@@ -108,6 +108,111 @@ def has_path(repo: str, path: str) -> bool:
     return rc == 0
 
 
+# Directories whose presence means a repository can be graded on observed
+# BEHAVIOUR rather than on internal API. This is the single most valuable
+# thing the screen can look for, and it was not looked for: on cli/cli, 30
+# of 34 extracted tasks were unit-test-only and none acceptance-only, which
+# left no way to grade a feature PR except by comparing CLI flags -- and
+# that ceilings at 100%, so it discriminates between arms not at all.
+BEHAVIOURAL_DIRS = ("acceptance", "e2e", "integration", "features",
+                    "functional", "system-test", "tests/e2e")
+
+# Title prefixes that mark a bug fix. Fixes are worth far more than
+# features here: their tests call API that already EXISTS, so an agent that
+# implements the behaviour passes whatever it names its internals. A
+# feature PR's tests name what the PR adds, which no agent can be expected
+# to guess -- 18 of 34 cli/cli tasks landed in that bucket.
+FIX_PREFIXES = ("fix", "bug", "bugfix", "hotfix", "patch")
+FEATURE_PREFIXES = ("feat", "feature", "add")
+
+# A PR this large costs hours per trial and, measured, does not
+# discriminate: cli-cli-13057 spans 13 files, takes 45 minutes, times out
+# on 3 of 5 trials and passes both times it finishes.
+BIG_PR_FILES = 8
+
+
+def pr_sample(repo: str, limit: int = 60) -> list[dict]:
+    """Recent merged post-cutoff PRs with the fields the new checks need."""
+    code, out = gh([
+        "pr", "list", "--repo", repo, "--state", "merged", "--limit",
+        str(limit), "--json", "title,files,mergedAt,labels"])
+    if code != 0 or not out.strip():
+        return []
+    try:
+        prs = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    return [p for p in prs if (p.get("mergedAt") or "") >= CUTOFF]
+
+
+def _bucket(files: list[str]) -> str:
+    """What a PR actually changes. A raw merge count is not supply:
+    measured on cli/cli, 174 post-cutoff merges contained 32 usable tasks,
+    because 47.7% were CI and agent-config and 24.1% dependency bumps."""
+    if not files:
+        return "empty"
+    if all(f.startswith(".github/") or "workflow" in f or "/skills/" in f
+           for f in files):
+        return "agent-config"
+    if all(f.endswith((".mod", ".sum", ".lock", ".toml", ".json"))
+           or "vendor/" in f for f in files):
+        return "deps"
+    src = [f for f in files if f.endswith((".go", ".rs", ".py", ".ts", ".js"))]
+    if not src:
+        return "docs-other"
+    tests = [f for f in src if "_test." in f or f.startswith("tests/")
+             or "/test" in f]
+    return "source+tests" if tests else "source-no-tests"
+
+
+def task_supply(repo: str) -> dict:
+    """The checks this session's failures argued for, all from the API."""
+    prs = pr_sample(repo)
+    if not prs:
+        return {"sampled": 0}
+    buckets, fixes, feats, big, behavioural = {}, 0, 0, 0, 0
+    sizes = []
+    for pr in prs:
+        files = [f.get("path", "") for f in (pr.get("files") or [])]
+        b = _bucket(files)
+        buckets[b] = buckets.get(b, 0) + 1
+        title = (pr.get("title") or "").lower()
+        head = title.split(":")[0].split("(")[0].strip()
+        if head in FIX_PREFIXES or title.startswith("fix "):
+            fixes += 1
+        elif head in FEATURE_PREFIXES:
+            feats += 1
+        if b == "source+tests":
+            sizes.append(len(files))
+            if len(files) > BIG_PR_FILES:
+                big += 1
+            if any(f.startswith(BEHAVIOURAL_DIRS) or "/e2e/" in f
+                   or "/acceptance/" in f for f in files):
+                behavioural += 1
+    usable = buckets.get("source+tests", 0)
+    sizes.sort()
+    return {
+        "sampled": len(prs),
+        "buckets": buckets,
+        "usable": usable,
+        "usable_rate": round(usable / len(prs), 3),
+        "fix_prs": fixes,
+        "feature_prs": feats,
+        # Titles are the only cheap signal, and most repositories do not
+        # use conventional prefixes -- on cli/cli just 3 of 60 were
+        # classifiable, so a fix_rate of 1.0 there rests on three PRs.
+        # The denominator is reported so the rate is never read as
+        # stronger than its sample.
+        "fix_classifiable": fixes + feats,
+        "fix_rate": (round(fixes / (fixes + feats), 3)
+                     if fixes + feats >= 8 else None),
+        "behavioural_tests": behavioural,
+        "behavioural_rate": round(behavioural / max(1, usable), 3),
+        "median_files": sizes[len(sizes) // 2] if sizes else 0,
+        "oversized": big,
+    }
+
+
 def screen(repo: str) -> dict:
     meta = gh_json(f"repos/{repo}")
     if not meta:
@@ -118,6 +223,8 @@ def screen(repo: str) -> dict:
     instr = [f for f in INSTRUCTION_FILES if has_path(repo, f)]
     owners = any(has_path(repo, p) for p in CODEOWNERS_PATHS)
     prs = post_cutoff_prs(repo)
+    supply = task_supply(repo)
+    has_behavioural = any(has_path(repo, d) for d in BEHAVIOURAL_DIRS)
 
     fails = []
     if lic not in PERMISSIVE:
@@ -128,6 +235,14 @@ def screen(repo: str) -> dict:
     if len(dirs) < MIN_SUBSYSTEMS:
         fails.append(f"only {len(dirs)} top-level subsystems "
                      f"(need {MIN_SUBSYSTEMS})")
+    # Raw merge count is not supply. Applied to the sample rather than the
+    # whole history, so it is an estimate and says so.
+    if supply.get("sampled") and supply["usable"] < 6:
+        fails.append(
+            f"only {supply['usable']}/{supply['sampled']} sampled PRs are "
+            f"source+tests ({supply['usable_rate']:.0%}); at that rate "
+            f"{prs} merges yield about {int(prs * supply['usable_rate'])} "
+            f"tasks")
 
     total_bytes = sum(langs.values()) or 1
     mixed = sum(1 for v in langs.values() if v / total_bytes >= 0.10)
@@ -143,10 +258,20 @@ def screen(repo: str) -> dict:
         "codeowners": owners,
         "languages": sorted(langs, key=langs.get, reverse=True)[:4],
         "mixed_languages": mixed,
+        "behavioural_suite": has_behavioural,
+        **{f"supply_{k}": v for k, v in supply.items()},
         "fails": fails,
         "passes": not fails,
-        # Preference score, used only to order the survivors.
-        "score": (2 * bool(instr)) + bool(owners) + (mixed >= 2),
+        # Preference score, used only to order the survivors. The three new
+        # terms outweigh the old ones because they are what decided whether
+        # cli/cli could produce a usable task, and the old ones were all
+        # satisfied by a repo that then produced one in-band scenario in
+        # twelve.
+        "score": (2 * bool(instr)) + bool(owners) + (mixed >= 2)
+                 + 3 * bool(has_behavioural)
+                 + 2 * ((supply.get("fix_rate") or 0) >= 0.5)
+                 + 2 * (supply.get("usable_rate", 0) >= 0.35)
+                 + (supply.get("median_files", 99) <= 4),
     }
 
 

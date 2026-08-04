@@ -86,6 +86,19 @@ def main():
                  f"the grid indistinguishable from a real one. Re-run mkpr "
                  f"without --no-verify.")
 
+    # A task whose unit tests cannot compile AND which exposes no command
+    # surface is gradeable by nothing. It used to enter the suite anyway
+    # and pass on diff_coverage alone.
+    from adherence.cligrade import command_path
+    ungradeable = [t for t in tasks
+                   if t.get("grader") == "cli"
+                   and not command_path(t.get("code_files") or [])]
+    if ungradeable:
+        for t in ungradeable:
+            print(f"  dropped #{t['pr']}: cli-graded but no pkg/cmd surface; "
+                  f"neither grader can judge it", file=sys.stderr)
+        tasks = [t for t in tasks if t not in ungradeable]
+
     prefix = args.prefix or args.fixture.replace("/", "-")
     out_root = Path(args.out)
     ids = []

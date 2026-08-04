@@ -99,9 +99,22 @@ def grade_cli(sandbox: Path, mirror: Path, merge: str,
     checks: list[Check] = []
     argv = command_path(code_files)
     if not argv:
-        return [skip("cli.surface",
-                     "PR touches no pkg/cmd/... command, so it has no "
-                     "command-line surface to compare")]
+        # No command surface, and this task is only here because its unit
+        # tests name symbols the fix introduces -- so neither grader can
+        # judge it. Reporting `skip` left diff_coverage and scope as the
+        # only checks that ran, and all_pass is "every non-ungradeable
+        # check passed": the verdict became "touched the right file and
+        # nothing else", which an agent passes by adding a comment.
+        # Measured: 5 of 5 such trials recorded as PASS.
+        #
+        # `bad` rather than `skip`, because a task nothing can grade must
+        # not be able to yield a pass. The suite should refuse it at
+        # extraction; this is the backstop for one that got through.
+        return [bad("cli.ungradeable",
+                    f"no grader can judge this task: its unit tests name "
+                    f"symbols the fix introduces, and it touches no "
+                    f"pkg/cmd/... command so there is no CLI surface to "
+                    f"compare. Files: {(code_files or [])[:3]}")]
 
     # --- the candidate: whatever the agent produced --------------------
     cand = sandbox / ".adh-gh-candidate"
