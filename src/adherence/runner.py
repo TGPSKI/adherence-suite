@@ -199,6 +199,36 @@ def materialize(scen_dir: Path, sandbox: Path, meta: dict) -> None:
     git(sandbox, "init -q")
 
 
+def require_arms_dir(scen_dir: Path, meta: dict, arm: str, arms_dir) -> None:
+    """A fixture-backed scenario with a named arm needs the arm's files.
+
+    `apply_arm` treats a missing arms directory as "arm is a label only",
+    which is right for the synthetic sNN scenarios -- they ship no
+    instruction surface, so there is nothing to overlay. On a fixture it is
+    catastrophic and silent: the sandbox gets whatever the repo happened to
+    carry at that commit, and the record still says `arm=a1`.
+
+    That is not hypothetical. Every one of the 34 cli/cli PR tasks has a
+    base commit that predates the repo's AGENTS.md, so `make probe --arm a1`
+    without an arms dir handed the model *no instruction surface at all* --
+    arm A0, the floor, written to disk labelled A1. A calibration measured
+    on the floor would then have set the difficulty band for an experiment
+    run on a different surface entirely.
+
+    A run that cannot apply the arm it claims must not start."""
+    if arms_dir or not arm or arm == "-":
+        return
+    if meta.get("repo"):
+        raise SystemExit(
+            f"{scen_dir.name}: --arm {arm!r} needs --arms-dir. This scenario "
+            f"is backed by a fixture repo, so the arm is an instruction "
+            f"surface that has to be overlaid onto the checkout -- without "
+            f"it the model gets whatever the repo shipped at that commit "
+            f"and the record still claims arm={arm!r}. Pass --arms-dir "
+            f"(e.g. fixtures/<name>.arms), or --arm '-' if you genuinely "
+            f"mean 'whatever is in the tree'.")
+
+
 def apply_arm(sandbox: Path, arms_dir: Path, arm: str) -> str:
     """Overlay one instruction-surface arm onto a materialized sandbox.
 
@@ -208,8 +238,10 @@ def apply_arm(sandbox: Path, arms_dir: Path, arm: str) -> str:
     stop being a floor and A5 would quietly be A1+A5.
 
     Returns a human-readable note for the log. A missing arms directory
-    is not an error: the synthetic sNN scenarios carry no instruction
-    surface, so `arm` is a label on those runs and nothing else."""
+    is not an error for the synthetic sNN scenarios: they carry no
+    instruction surface, so `arm` is a label on those runs and nothing
+    else. For a fixture-backed scenario it is always an error -- see
+    `require_arms_dir`."""
     if not arms_dir:
         return "no arms dir; arm is a label only"
     d = arms_dir / arm
@@ -264,6 +296,7 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
     # tree. `ignore:` in scenario.yaml lists whatever this repo's own
     # test run writes and its .gitignore misses (H9).
     gradelib.write_harness_excludes(sandbox, meta.get("ignore", []))
+    require_arms_dir(scen_dir, meta, arm, arms_dir)
     apply_arm(sandbox, arms_dir, arm)
     # Baseline commit LAST, after the arm overlay is in place. Committing
     # first would leave every arm's own instruction files sitting in

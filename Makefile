@@ -30,6 +30,8 @@ help:
 		'viewing — read-only, never spends a GPU-second:' \
 		'  make table [FILTER=a3/*]   one-shot snapshot (NOCOLOR=1 to strip ANSI)' \
 		'  make matrix [FILTER=a3/*]  interactive results matrix' \
+		'                             FILES= scopes to one run (default: all of' \
+		'                             runs/); EXPECT=N adds a live progress bar' \
 		'  make report [FILES=...]    publishable markdown scoreboard' \
 		'  make calibrate             proxy vs adapter agreement — the H4 gate' \
 		'  make analyze [FILES=...]   pre-specified falsifier verdicts (docs/EVAL.md)' \
@@ -79,10 +81,12 @@ lint:
 # --- viewing ---
 
 table:
-	@FILTER="$(FILTER)" REF="$(REF)" PROXY="$(PROXY)" $(PY) -m adherence.table $(FILTER)
+	@FILTER="$(FILTER)" REF="$(REF)" PROXY="$(PROXY)" FILES="$(FILES)" \
+		$(PY) -m adherence.table $(FILTER)
 
 matrix:
-	@REF="$(REF)" $(PY) -m adherence.matrix_tui $(FILTER) --ref $(REF) \
+	@REF="$(REF)" FILES="$(FILES)" EXPECT="$(EXPECT)" \
+		$(PY) -m adherence.matrix_tui $(FILTER) --ref $(REF) \
 		$(if $(PROXY),--proxy $(PROXY),)
 
 report:
@@ -125,6 +129,12 @@ mkscenarios:
 # documented default of 3 never once applied.
 PROBE_OUT    ?= runs/probe.jsonl
 PROBE_TRIALS ?= 5
+# The probe screens difficulty under the PRACTICAL control, so the band it
+# measures is the band the experiment will see. That requires ARMSDIR: the
+# cli/cli PR base commits all predate the repo's own AGENTS.md, so without
+# the overlay `--arm a1` silently delivers no instruction surface at all --
+# the A0 floor, recorded as A1. The runner now refuses that outright.
+PROBE_ARM    ?= a1
 
 probe: SUITE := $(or $(SUITE),suite-pr.yaml)
 probe:
@@ -138,7 +148,8 @@ probe:
 	mkdir -p $(dir $(PROBE_OUT))
 	bench/isolate.sh $(PYTHON) -m adherence.runner --suite $(SUITE) \
 		--adapter $(ADAPTER) --model $(MODEL) --trials $(PROBE_TRIALS) \
-		--arm a1 --out $(PROBE_OUT) \
+		--arm $(PROBE_ARM) --out $(PROBE_OUT) \
+		$(if $(ARMSDIR),--arms-dir $(ARMSDIR),) \
 		$(if $(JOBS),--jobs $(JOBS),) $(if $(TIMEOUT),--timeout $(TIMEOUT),) \
 		$(if $(ONLY),--only $(ONLY),)
 	@$(PY) -m adherence.probe $(PROBE_OUT)

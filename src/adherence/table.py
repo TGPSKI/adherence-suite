@@ -34,7 +34,18 @@ def main():
     ref = os.environ.get("REF", "a1")
     proxy = os.environ.get("PROXY")
 
-    cells = sd.load_cells(pattern=pattern)
+    # Scope to one run. Defaulting to every *.jsonl under runs/ pools a
+    # live probe with every smoke test that ever landed there.
+    files = [f for f in os.environ.get("FILES", "").split() if f] or None
+    if files:
+        files = [f if os.path.isabs(f) else os.path.join(sd.ROOT, f)
+                 for f in files]
+        missing = [f for f in files if not os.path.exists(f)]
+        if missing:
+            print(f"no such results file: {', '.join(missing)}")
+            return 1
+
+    cells = sd.load_cells(paths=files, pattern=pattern)
     if not cells:
         print("no results match" if pattern else
               "no results found — run the suite first (make all)")

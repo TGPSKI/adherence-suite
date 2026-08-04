@@ -40,8 +40,15 @@ GATE = 0.02          # H4 tolerance
 
 
 class SuiteTui(TuiApp):
-    def __init__(self, stdscr, pattern="", ref="a1", proxy=None):
+    def __init__(self, stdscr, pattern="", ref="a1", proxy=None,
+                 files=None, expect=0):
         super().__init__(stdscr)
+        # Scope to one run. Without this the loader globs every *.jsonl in
+        # runs/, so a live probe renders pooled with every smoke test and
+        # calibration run that ever landed there -- and the numbers on
+        # screen belong to no single experiment.
+        self.files = files or None
+        self.expect = expect     # runs this batch will produce, for progress
         self.pattern = pattern
         self.ref = ref
         self.proxy_path = proxy
@@ -65,12 +72,12 @@ class SuiteTui(TuiApp):
     # ---- data ------------------------------------------------------------
 
     def reload(self):
-        self.cells = sd.load_cells()
-        self.rows = sd.load_rows()
+        self.cells = sd.load_cells(paths=self.files)
+        self.rows = sd.load_rows(self.files)
         self.proxy_rows = (sd.load_proxy(self.proxy_path)
                            if self.proxy_path else [])
         self.stamp = time.time()
-        self.seen_mtime = sd.newest_mtime()
+        self.seen_mtime = sd.newest_mtime(self.files)
 
     def visible(self):
         cs = [c for c in self.cells if sd.matches(c["tag"], self.pattern)]
@@ -106,6 +113,25 @@ class SuiteTui(TuiApp):
         self._put(0, max(x + 2, max_x - len(tail) - 2), tail,
                   C.A_BOLD if self.editing else C.A_DIM)
         self._put(1, 1, VIEW_HELP[v], C.A_DIM)
+
+        # Live progress. `runs` is what has actually landed on disk, which
+        # is the only thing a viewer can honestly claim: a run in flight has
+        # not been written yet and must not be counted as done.
+        n = len(self.rows)
+        if self.expect:
+            pct = 100.0 * n / self.expect
+            bar_w = 18
+            fill = int(bar_w * min(n / self.expect, 1.0))
+            prog = (f"{'#' * fill}{'.' * (bar_w - fill)} "
+                    f"{n}/{self.expect} {pct:.0f}%")
+            done = n >= self.expect
+            self._put(1, max(len(VIEW_HELP[v]) + 3, max_x - len(prog) - 2),
+                      prog, C.color_pair(2 if done else 5))
+        else:
+            tail = f"{n} run(s)" + (f" from {len(self.files)} file(s)"
+                                    if self.files else "")
+            self._put(1, max(len(VIEW_HELP[v]) + 3, max_x - len(tail) - 2),
+                      tail, C.A_DIM)
 
     def footer(self, max_y, max_x, total, avail):
         C = self.curses
@@ -468,22 +494,35 @@ def main():
     pattern = ""
     ref = os.environ.get("REF", "a1")
     proxy = os.environ.get("PROXY") or None
+    files = [f for f in os.environ.get("FILES", "").split() if f]
+    expect = int(os.environ.get("EXPECT", "0") or 0)
     args = [a for a in sys.argv[1:]]
     for i, a in enumerate(args):
         if a == "--ref" and i + 1 < len(args):
             ref = args[i + 1]
         elif a == "--proxy" and i + 1 < len(args):
             proxy = args[i + 1]
+        elif a == "--files" and i + 1 < len(args):
+            files = args[i + 1].split(",")
+        elif a == "--expect" and i + 1 < len(args):
+            expect = int(args[i + 1])
         elif not a.startswith("--") and (i == 0 or args[i - 1] not in
-                                         ("--ref", "--proxy")):
+                                         ("--ref", "--proxy", "--files",
+                                          "--expect")):
             pattern = a
     if proxy and not os.path.isabs(proxy):
         proxy = os.path.join(sd.ROOT, proxy)
-    if not sd.load_rows():
+    files = [f if os.path.isabs(f) else os.path.join(sd.ROOT, f)
+             for f in files]
+    missing = [f for f in files if not os.path.exists(f)]
+    if missing:
+        print(f"no such results file: {', '.join(missing)}", file=sys.stderr)
+        return 1
+    if not sd.load_rows(files or None):
         print("no results found — run the suite first "
               "(make all), or pass a results file glob", file=sys.stderr)
         return 1
-    curses_main(lambda scr: SuiteTui(scr, pattern, ref, proxy))
+    curses_main(lambda scr: SuiteTui(scr, pattern, ref, proxy, files, expect))
     return 0
 
 
