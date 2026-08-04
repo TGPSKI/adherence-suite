@@ -54,8 +54,25 @@ VIEW_HELP = {
 }
 SORTS = ("tag", "pass", "tok")
 SECTIONS = ("running", "summary", "graded")
+
+
+def started_local(row) -> str:
+    """`provenance.started_at` as local wall-clock HH:MM:SS.
+
+    Stored UTC, because a result that cannot be placed on a shared clock
+    is not replayable; shown local, because the operator reading it is
+    comparing against their own terminal."""
+    ts = (row.get("provenance") or {}).get("started_at", "")
+    if not ts:
+        return "—"
+    try:
+        import datetime as _dt
+        d = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        return d.astimezone().strftime("%H:%M:%S")
+    except (ValueError, TypeError):
+        return ts[-8:] or "—"
 # Per-section sorts, cycled with [s] on whichever section has focus.
-GRADED_SORTS = ("recent", "verdict", "tok", "dur")
+GRADED_SORTS = ("recent", "started", "verdict", "tok", "dur")
 SUM_SORTS = ("tag", "pass", "tok", "dur", "left")
 TASK_SORTS = ("id", "grader", "files", "dirs", "pr")
 DESIGN_SORTS = ("arm", "always", "ondemand")
@@ -654,8 +671,8 @@ class SuiteTui(TuiApp):
                       C.color_pair(5) if self.live_section == 2 else C.A_BOLD)
             y += 1
             self._put(y, 1, f"{'scenario':<20}{'arm':>4}{'t':>3}"
-                            f"{'verdict':>13}{'calls':>7}{'tok_in':>12}"
-                            f"{'dur':>9}  failing", C.A_DIM)
+                            f"{'verdict':>13}{'started':>10}{'calls':>7}"
+                            f"{'tok_in':>12}{'dur':>9}  failing", C.A_DIM)
             y += 1
             self.graded_cursor = max(0, min(self.graded_cursor,
                                             len(recent) - 1))
@@ -687,11 +704,16 @@ class SuiteTui(TuiApp):
                 self._put(y, 21, f"{r.get('arm', '-'):>4}", C.A_DIM)
                 self._put(y, 25, f"{r['trial']:>3}", C.A_DIM)
                 self._put(y, 28, f"{verdict:>13}", col)
-                self._put(y, 41, f"{m.get('calls', 0):>7}", C.A_DIM)
-                self._put(y, 48, f"{m.get('tok_in_billed', 0):>12,}", C.A_DIM)
-                self._put(y, 60, f"{lv.fmt_age(r.get('duration_s', 0)):>9}",
+                # When the trial STARTED, not when its row was written --
+                # results land out of order now that each is emitted as it
+                # finishes, so "recent" in the sort and "started" here
+                # answer two different questions.
+                self._put(y, 41, f"{started_local(r):>10}", C.A_DIM)
+                self._put(y, 51, f"{m.get('calls', 0):>7}", C.A_DIM)
+                self._put(y, 58, f"{m.get('tok_in_billed', 0):>12,}", C.A_DIM)
+                self._put(y, 70, f"{lv.fmt_age(r.get('duration_s', 0)):>9}",
                           C.A_DIM)
-                self._put(y, 71, fails[:max(0, max_x - 73)], C.A_DIM)
+                self._put(y, 81, fails[:max(0, max_x - 83)], C.A_DIM)
                 y += 1
             if len(recent) > rows_g:
                 self.scrollbar(top_g, rows_g, max_x - 2, len(recent),
@@ -912,6 +934,11 @@ class SuiteTui(TuiApp):
         mode = GRADED_SORTS[self.graded_sort]
         keys = {
             "recent": lambda r: r.get("_seq", 0),
+            # Arrival order and start order diverge under --jobs>1, and
+            # each answers a different question: what landed last, versus
+            # what the run was doing at a given moment.
+            "started": lambda r: ((r.get("provenance") or {})
+                                  .get("started_at", ""), r.get("_seq", 0)),
             "verdict": lambda r: (verdict_rank(r), r.get("_seq", 0)),
             "tok": lambda r: (r.get("metrics") or {}).get("tok_in_billed", 0),
             "dur": lambda r: r.get("duration_s", 0),
