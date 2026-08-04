@@ -305,7 +305,7 @@ class SuiteTui(TuiApp):
             keys = [("[q] back", C.A_BOLD), ("[esc] root", C.A_DIM),
                     ("[Q] quit", C.A_DIM)]
         elif live_v:
-            keys = [("[tab] view", C.A_DIM),
+            keys = [("[tab/shift-tab] view", C.A_DIM),
                     (f"[h/l] section: {SECTIONS[self.live_section]}",
                      C.color_pair(5)),
                     ("[j/k] row", C.A_DIM), ("[s] sort [S] asc/desc",
@@ -313,7 +313,7 @@ class SuiteTui(TuiApp):
                     ("[space] detail", C.A_DIM), ("[r] reload", C.A_DIM),
                     ("[q] quit", C.A_DIM)]
         else:
-            keys = [("[tab] view", C.A_DIM),
+            keys = [("[tab/shift-tab] view", C.A_DIM),
                     (f"[L] live·{n_live}",
                      C.color_pair(2) if n_live else C.A_DIM),
                     ("[s] sort", C.A_DIM), ("[/] filter", C.A_DIM),
@@ -1368,9 +1368,15 @@ class SuiteTui(TuiApp):
                 self.detail = False
                 self.act_cursor = self.act_scroll = 0
                 return False
-        if key == 9:                                  # tab
+        if key == 9:                                  # tab: next view
             self.view = (self.view + 1) % len(VIEWS)
-            self.scroll = 0
+            self.scroll = self.cursor = 0
+        elif key in (C.KEY_BTAB, 353):                # shift-tab: previous
+            # 353 is the literal code some terminals send when terminfo
+            # carries no kcbt entry, so both are accepted rather than
+            # leaving the key dead on a terminal that reports it raw.
+            self.view = (self.view - 1) % len(VIEWS)
+            self.scroll = self.cursor = 0
         elif key == ord("S"):
             if VIEWS[self.view] == "live" and self.live_section == 2:
                 self.graded_desc = not self.graded_desc
