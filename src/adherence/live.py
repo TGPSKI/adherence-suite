@@ -23,6 +23,7 @@ import errno
 import glob
 import json
 import os
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -43,13 +44,61 @@ def out_dirs(tmp: str | None = None):
 
 
 def _alive(pid: int) -> bool:
-    if not pid:
+    """Does this pid exist? POSIX only -- see below.
+
+    `os.kill(pid, 0)` is the standard existence probe on POSIX, where
+    signal 0 is "check, do not send". On Windows it is not a probe at all:
+    `signal.CTRL_C_EVENT == 0`, so the call delivers a real Ctrl-C to the
+    target's console group. The selftest wrote a marker carrying its own
+    pid, this function checked it, and the check raised KeyboardInterrupt
+    inside an unrelated subprocess several tests later. Sixteen seconds
+    into the Windows job, with a traceback pointing at code that had
+    nothing to do with it.
+
+    A liveness check must never be able to affect what it observes, so on
+    Windows it declines to answer and the caller falls back to evidence
+    that cannot misfire."""
+    if not pid or os.name != "posix":
         return False
     try:
         os.kill(pid, 0)
     except OSError as e:
         return e.errno == errno.EPERM      # exists, not ours
     return True
+
+
+def busy_out_dirs() -> set[str] | None:
+    """Out-dirs named on the command line of some live process.
+
+    The runner passes the out-dir to the adapter as an argument, so it is
+    right there in `ps` for the whole life of the trial. That makes it a
+    direct liveness signal, and a much better one than the fallback it
+    replaces: without a marker there is no pid, so liveness was inferred
+    from "the stream file moved recently", which reports a run killed ten
+    seconds ago as still running for another three minutes. Observed
+    exactly that after a teardown -- four rows claiming to run while `ps`
+    showed nothing at all.
+
+    None means ps was unavailable and the caller should fall back."""
+    try:
+        out = subprocess.run(["ps", "-eo", "args"], capture_output=True,
+                             text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    busy = set()
+    for line in out.stdout.splitlines():
+        for tok in line.split():
+            if "adh-out-" in tok:
+                # prompt.txt lives inside the out-dir; take the directory.
+                p = tok.rstrip("/")
+                if not p.endswith("adh-out-") and "/adh-out-" in f"/{p}":
+                    while p and "adh-out-" not in os.path.basename(p):
+                        p = os.path.dirname(p)
+                    if p:
+                        busy.add(p)
+    return busy
 
 
 # The stream nests everything one level down under "part"; the useful
@@ -177,6 +226,7 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
     """One record per run currently in flight, newest activity first."""
     root = root or REPO_ROOT
     now = now or time.time()
+    busy = busy_out_dirs()
     runs = []
     for d in out_dirs(tmp):
         p = Path(d)
@@ -214,11 +264,15 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
         except OSError:
             elapsed = 0.0
 
-        # No marker means no pid to check, so liveness falls back to "the
-        # stream moved recently", which is the same evidence a viewer would
-        # use by eye.
-        alive = (_alive(int(m["pid"])) if m.get("pid")
-                 else age < STALE_S)
+        # Liveness, best evidence first: a process still naming this
+        # out-dir, then the runner's recorded pid, and only if `ps` is
+        # unavailable the weak "stream moved recently" guess.
+        if busy is not None:
+            alive = d in busy
+        elif m.get("pid") and os.name == "posix":
+            alive = _alive(int(m["pid"]))
+        else:
+            alive = age < STALE_S
         if age > ABANDONED_S and not alive:
             continue                    # debris from a killed run
 
@@ -295,7 +349,60 @@ def fmt_age(s) -> str:
     return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
 
+def sweep(tmp: str | None = None, dry: bool = False) -> tuple[int, int]:
+    """Remove sandboxes and out-dirs no live process is using.
+
+    A trial that completes cleans up after itself; one that is killed does
+    not, and the leftovers are not harmless. They are what the live view
+    reads, so a torn-down run keeps rendering as rows long after it is
+    gone, and at ~30MB of git checkout apiece they are not free either.
+
+    Refuses while anything is running, because the only way to decide a
+    directory is dead is to know nothing is using it."""
+    import shutil
+    busy = busy_out_dirs()
+    if busy is None:
+        raise RuntimeError("cannot enumerate processes; refusing to delete "
+                           "directories that might be in use")
+    if busy:
+        raise RuntimeError(
+            f"{len(busy)} run(s) still active. Stop them first -- deleting a "
+            f"sandbox under a running agent produces a garbage transcript "
+            f"and a result row that looks real.")
+    root = tmp or tempfile.gettempdir()
+    freed = n = 0
+    for d in sorted(glob.glob(os.path.join(root, "adh-*"))):
+        try:
+            size = sum(f.stat().st_size for f in Path(d).rglob("*")
+                       if f.is_file())
+        except OSError:
+            size = 0
+        n += 1
+        freed += size
+        if not dry:
+            shutil.rmtree(d, ignore_errors=True)
+    return n, freed
+
+
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--clean", action="store_true",
+                    help="delete sandboxes and out-dirs from finished or "
+                         "killed runs; refuses while anything is running")
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+    if a.clean:
+        try:
+            n, freed = sweep(dry=a.dry_run)
+        except RuntimeError as e:
+            print(e)
+            return 1
+        verb = "would remove" if a.dry_run else "removed"
+        print(f"{verb} {n} director{'y' if n == 1 else 'ies'}, "
+              f"{freed / 1e6:.0f} MB")
+        return 0
+
     runs = snapshot()
     if not runs:
         print("nothing in flight")

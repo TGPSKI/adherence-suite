@@ -16,7 +16,7 @@ RUNNER   = $(PYTHON) -m adherence.runner --adapter $(ADAPTER) --model $(MODEL) \
              --trials $(TRIALS) $(ARMFLAGS) --out $(OUT)
 
 .PHONY: help check ci-local compile selftest schema lint table matrix report \
-	analyze floors live calibrate screen mkpr mkscenarios trees probe run all clean
+	analyze floors live clean-runs calibrate screen mkpr mkscenarios trees probe run all clean
 
 help:
 	@printf '%s\n' \
@@ -29,6 +29,7 @@ help:
 		'' \
 		'viewing — read-only, never spends a GPU-second:' \
 		'  make live                  what is running right now, one-shot' \
+		'  make clean-runs            delete sandboxes/out-dirs from dead runs' \
 		'  make table [FILTER=a3/*]   one-shot snapshot (NOCOLOR=1 to strip ANSI)' \
 		'  make matrix [FILTER=a3/*]  interactive results matrix' \
 		'                             FILES= scopes to one run (default: all of' \
@@ -86,6 +87,11 @@ lint:
 
 live:
 	@$(PY) -m adherence.live
+
+## Delete sandboxes and out-dirs left by finished or killed runs.
+## Refuses while anything is running.
+clean-runs:
+	@$(PY) -m adherence.live --clean
 
 table:
 	@FILTER="$(FILTER)" REF="$(REF)" PROXY="$(PROXY)" FILES="$(FILES)" \

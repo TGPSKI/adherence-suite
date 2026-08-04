@@ -621,6 +621,15 @@ def check_live() -> list[str]:
                             f"half-written last line must be counted, not "
                             f"raised")
 
+        # A liveness check must not be able to affect what it observes.
+        # os.kill(pid, 0) is a probe on POSIX and a real Ctrl-C on Windows,
+        # where signal.CTRL_C_EVENT == 0 -- checking our own pid took the
+        # whole selftest down with a KeyboardInterrupt raised inside an
+        # unrelated subprocess several checks later.
+        if lv._alive(_os.getpid()) and _os.name != "posix":
+            problems.append("_alive() answered on a non-POSIX platform; "
+                            "os.kill(pid, 0) is not an existence probe there")
+
         # No marker: scenario is recoverable from the path, arm is not.
         runs = lv.snapshot(tmp=tmp)
         if len(runs) != 1:
