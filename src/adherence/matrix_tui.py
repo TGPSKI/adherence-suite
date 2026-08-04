@@ -32,9 +32,10 @@ from adherence.tui.framework import TuiApp, curses_main
 
 VIEWS = ("live", "cells", "arms", "cost", "calib")
 VIEW_HELP = {
-    "live": "[h/l] section · [j/k] row · [space] detail — running, graded, "
-            "per arm×scenario",
-    "cells": "every (arm, scenario) cell — [space] opens detail",
+    "live": "running · graded · per arm×scenario   [h/l] section  "
+            "[j/k] row  [space] detail",
+    "cells": "every (arm, scenario) cell   [j/k] row  [space] detail "
+             "(median/mean/p90)",
     "arms": "per-arm rollup; ratios are paired on scenario, geometric",
     "cost": "pass rate vs tokens — ★ is the Pareto frontier (§5)",
     "calib": "adapter vs proxy per run; >2% fails the H4 gate (§3.2)",
@@ -221,21 +222,34 @@ class SuiteTui(TuiApp):
         C = self.curses
         n_live = sum(1 for r in self.live if r["state"] == "running")
         live_v = VIEWS[self.view] == "live"
-        # Depth decides what q does, so the footer says which one it is.
+        # Depth-accurate: advertise only what the current level responds
+        # to. A legend listing keys that do nothing here is worse than no
+        # legend, because it is checked once and then trusted.
         if self.act_open:
-            back = ("[q] back to activity", C.A_BOLD)
+            keys = [("[j/k] scroll", C.A_DIM), ("[space] back to activity",
+                                                C.A_BOLD),
+                    ("[esc] root", C.A_DIM), ("[Q] quit", C.A_DIM)]
+        elif self.detail and live_v and self.live_section == 0:
+            keys = [("[j/k] event", C.A_DIM), ("[space] expand", C.A_DIM),
+                    ("[q] back to list", C.A_BOLD), ("[esc] root", C.A_DIM),
+                    ("[Q] quit", C.A_DIM)]
         elif self.detail:
-            back = ("[q] back to list", C.A_BOLD)
+            keys = [("[q] back", C.A_BOLD), ("[esc] root", C.A_DIM),
+                    ("[Q] quit", C.A_DIM)]
+        elif live_v:
+            keys = [("[tab] view", C.A_DIM),
+                    (f"[h/l] section: {SECTIONS[self.live_section]}",
+                     C.color_pair(5)),
+                    ("[j/k] row", C.A_DIM), ("[space] detail", C.A_DIM),
+                    ("[r] reload", C.A_DIM), ("[q] quit", C.A_DIM)]
         else:
-            back = ("[q] quit", C.A_DIM)
-        keys = [("[tab] view", C.A_DIM),
-                (f"[L] live·{n_live}", C.color_pair(2) if n_live else C.A_DIM)]
-        if live_v and not self.detail:
-            keys.append((f"[h/l] section: {SECTIONS[self.live_section]}",
-                         C.color_pair(5)))
-        keys += [("[s] sort", C.A_DIM), ("[/] filter", C.A_DIM),
-                 ("[p] pick", C.A_DIM), ("[space] detail", C.A_DIM),
-                 ("[r] reload", C.A_DIM), back, ("[Q] quit", C.A_DIM)]
+            keys = [("[tab] view", C.A_DIM),
+                    (f"[L] live·{n_live}",
+                     C.color_pair(2) if n_live else C.A_DIM),
+                    ("[s] sort", C.A_DIM), ("[/] filter", C.A_DIM),
+                    ("[F] clear", C.A_DIM), ("[p] pick", C.A_DIM),
+                    ("[space] detail", C.A_DIM), ("[r] reload", C.A_DIM),
+                    ("[q] quit", C.A_DIM)]
         if self.editing:
             keys = [("type a filter · [enter] apply · [esc] cancel", C.A_BOLD)]
         self.render_footer_items(max_y, keys)
@@ -1081,9 +1095,19 @@ class SuiteTui(TuiApp):
         # any depth. `q` used to mean both, so from inside a nested view
         # there was no way to leave without pressing it repeatedly and no
         # way to know whether the next press would exit the program.
+        # [Q] quit from anywhere · [q] back one level · [esc] back to the
+        # root list regardless of depth. q alone used to mean both "back"
+        # and "quit", so from a nested view there was no way to leave
+        # without pressing it repeatedly and no way to know which press
+        # would exit the program.
         if key == ord("Q"):
             return True
-        if key in (ord("q"), 27):
+        if key == 27:
+            if self.detail or self.act_open:
+                self.detail = self.act_open = False
+                return False
+            return True
+        if key == ord("q"):
             if self.detail:
                 self.detail = False
                 return False
@@ -1123,7 +1147,11 @@ class SuiteTui(TuiApp):
             if self.act_open:
                 if key == ord("Q"):
                     return True          # Q quits from any depth
-                if key in (ord(" "), 10, 13, ord("q"), 27):
+                if key == 27:            # esc: all the way out
+                    self.act_open = self.detail = False
+                    self.act_scroll = 0
+                    return False
+                if key in (ord(" "), 10, 13, ord("q")):
                     self.act_open = False
                     self.act_scroll = 0
                 elif key in (ord("j"), C.KEY_DOWN):
@@ -1155,7 +1183,7 @@ class SuiteTui(TuiApp):
                 return False
             if key == ord("Q"):
                 return True
-            if key in (ord("q"), 27):
+            if key in (ord("q"), 27):    # one level == root from here
                 self.detail = False
                 self.act_cursor = self.act_scroll = 0
                 return False
