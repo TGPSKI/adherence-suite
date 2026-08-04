@@ -100,6 +100,7 @@ class SuiteTui(TuiApp):
         # whatever fit, with no scroll and no indication -- so 25 graded
         # rows showed 6 and the cursor could sit on one of the 19 nobody
         # could see.
+        self.live_scroll = 0
         self.graded_scroll = 0
         self.sum_scroll = 0
         self.graded_sort = 0
@@ -373,7 +374,9 @@ class SuiteTui(TuiApp):
 
     def render(self, max_y, max_x):
         self.header(max_x)
-        body = max_y - 3
+        # -1 more than the chrome strictly needs: a blank row above the
+        # legend, so the last line of content does not read as part of it.
+        body = max_y - 4
         if self.picking:
             total, avail = self.view_picker(body, max_x)
             self.footer(max_y, max_x, total, avail)
@@ -459,20 +462,26 @@ class SuiteTui(TuiApp):
         max_y = max_y or (body + 3)
         runs = self.live
         y = 3
-        # Allocate by what each section actually holds, not a fixed split.
-        # Every section costs a title + a column header + a blank, and the
-        # summary line at the top costs two; a section with three rows
-        # should not reserve half the screen while another is cut off.
+        # Priority, not proportion. Running and summary are bounded --
+        # one row per concurrent trial, one per (arm, scenario) cell -- so
+        # they fit and should simply be shown whole. Graded grows without
+        # bound for the life of the run, so it is the section that absorbs
+        # the scrolling. Sharing the space proportionally instead gave
+        # graded 22 rows it did not need while truncating a 3-row running
+        # table, and on a 24-line terminal pushed graded off the screen
+        # entirely -- absent, not truncated, with nothing saying so.
         HEAD = 3
-        n_run, n_grad = len(runs), len(self.rows)
-        n_sum = len(self.cells)
-        overhead = 2 + HEAD * (bool(n_run) + bool(n_grad) + bool(n_sum))
-        spare = max(3, body - overhead - min(n_run, 8))
-        # Graded and summary share the remainder in proportion to how many
-        # rows each has, so neither starves the other on a short terminal.
-        want = max(1, n_grad) + max(1, n_sum)
-        self.sec_budget = max(2, min(n_grad or 1,
-                                     int(spare * max(1, n_grad) / want)))
+        n_run, n_sum, n_grad = len(runs), len(self.cells), len(self.rows)
+        overhead = 2 + HEAD * (bool(n_run) + bool(n_sum) + bool(n_grad))
+        spare = max(1, body - overhead)
+        self.run_budget = min(n_run, spare)
+        spare -= self.run_budget
+        self.sum_budget = min(n_sum, spare)
+        spare -= self.sum_budget
+        # Graded takes the remainder, and at least one row so the section
+        # never disappears without a scrollbar to explain itself.
+        self.sec_budget = max(1, spare)
+
         s = lv.summarize(runs)
         done = len(self.rows)
         self._put(y, 1, f"{s['running']} running · {s['grading']} grading · "
@@ -493,8 +502,17 @@ class SuiteTui(TuiApp):
                             f"{'elapsed':>9}{'budget':>8}  doing", C.A_DIM)
             y += 1
             self.live_cursor = max(0, min(self.live_cursor, len(runs) - 1))
-            shown = runs[:max(1, min(len(runs), body - 12))]
-            for i, r in enumerate(shown):
+            rows_r = max(1, min(len(runs), self.run_budget))
+            if self.live_cursor < self.live_scroll:
+                self.live_scroll = self.live_cursor
+            elif self.live_cursor >= self.live_scroll + rows_r:
+                self.live_scroll = self.live_cursor - rows_r + 1
+            self.live_scroll = max(0, min(self.live_scroll,
+                                          max(0, len(runs) - rows_r)))
+            top = y
+            shown = runs[self.live_scroll:self.live_scroll + rows_r]
+            for i_off, r in enumerate(shown):
+                i = self.live_scroll + i_off
                 base = (C.color_pair(5)
                         if i == self.live_cursor and self.live_section == 0
                         else 0)
@@ -521,9 +539,13 @@ class SuiteTui(TuiApp):
                           C.color_pair(4) if b and b > 0.8 else C.A_DIM)
                 self._put(y, 86, r["last_tool"][:max(0, max_x - 88)], C.A_DIM)
                 y += 1
-            if len(runs) > len(shown):
-                self._put(y, 1, f"  … {len(runs) - len(shown)} more running",
-                          C.A_DIM)
+            if len(runs) > rows_r:
+                self.scrollbar(top, rows_r, max_x - 2, len(runs),
+                               self.live_scroll)
+                self._put(y, 1,
+                          f"  {self.live_scroll + 1}-"
+                          f"{self.live_scroll + rows_r} of {len(runs)}"
+                          f"   [j/k] scrolls", C.A_DIM)
                 y += 1
         else:
             self._put(y, 3, "nothing in flight", C.A_DIM)
@@ -556,13 +578,14 @@ class SuiteTui(TuiApp):
             if self.expect and cells:
                 per_cell = max(1, round(self.expect / max(1, len(cells))))
             self.sum_cursor = max(0, min(self.sum_cursor, len(cells) - 1))
-            rows_s = max(1, min(len(cells), max_y - y - 2))
+            rows_s = max(1, min(len(cells), self.sum_budget))
             if self.sum_cursor < self.sum_scroll:
                 self.sum_scroll = self.sum_cursor
             elif self.sum_cursor >= self.sum_scroll + rows_s:
                 self.sum_scroll = self.sum_cursor - rows_s + 1
             self.sum_scroll = max(0, min(self.sum_scroll,
                                          max(0, len(cells) - rows_s)))
+            top_s = y
             for ci_off, c in enumerate(cells[self.sum_scroll:
                                              self.sum_scroll + rows_s]):
                 ci = self.sum_scroll + ci_off
@@ -603,6 +626,8 @@ class SuiteTui(TuiApp):
                           else f"{'—':>8}", C.A_DIM)
                 y += 1
             if len(cells) > rows_s:
+                self.scrollbar(top_s, rows_s, max_x - 2, len(cells),
+                               self.sum_scroll)
                 self._put(y, 1,
                           f"  {self.sum_scroll + 1}-"
                           f"{self.sum_scroll + rows_s} of {len(cells)}"
@@ -641,6 +666,7 @@ class SuiteTui(TuiApp):
             self.graded_scroll = max(0, min(self.graded_scroll,
                                             max(0, len(recent) - rows_g)))
             window_g = recent[self.graded_scroll:self.graded_scroll + rows_g]
+            top_g = y
             for gi_off, r in enumerate(window_g):
                 gi = self.graded_scroll + gi_off
                 hl = (C.color_pair(5)
@@ -667,6 +693,8 @@ class SuiteTui(TuiApp):
                 self._put(y, 67, fails[:max(0, max_x - 69)], C.A_DIM)
                 y += 1
             if len(recent) > rows_g:
+                self.scrollbar(top_g, rows_g, max_x - 2, len(recent),
+                               self.graded_scroll)
                 self._put(y, 1,
                           f"  {self.graded_scroll + 1}-"
                           f"{self.graded_scroll + rows_g} of {len(recent)}"
