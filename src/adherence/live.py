@@ -416,10 +416,15 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
         # Same reason as runner.wait_or_kill: the root stream goes silent
         # for the whole time a subagent is working, so a delegating trial
         # reads as stalled when it is the busiest thing on the machine.
+        # opencode's store runs in SQLite WAL mode, so live writes land in
+        # `-wal` and the main .db mtime only moves on checkpoint -- measured
+        # 234s stale while `-wal` was 33s fresh. Watching the .db alone made
+        # a delegating trial look idle for a whole checkpoint interval.
         store = p / "xdg" / "data" / "opencode" / "opencode.db"
+        watched = [stdout, store, Path(str(store) + "-wal"), p]
         try:
-            touched = max(os.path.getmtime(x) for x in
-                          (stdout, store, p) if os.path.exists(x))
+            touched = max(os.path.getmtime(x) for x in watched
+                          if os.path.exists(x))
         except (OSError, ValueError):
             touched = 0.0
         age = now - touched if touched else 1e9

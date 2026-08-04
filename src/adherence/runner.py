@@ -349,17 +349,23 @@ def wait_or_kill(proc, out_dir: Path, hard_s: int, idle_s: int):
     # it *more* to the arms that route to subagents -- which are the arms
     # under test. Progress is either file moving.
     store = out_dir / "xdg" / "data" / "opencode" / "opencode.db"
+    # WAL mode: the main .db neither grows nor restamps between
+    # checkpoints, so summing it alone made a busy subagent look idle.
+    wal = Path(str(store) + "-wal")
     t0 = time.time()
     last_size, last_change = -1, t0
 
     def _activity_size():
         import contextlib
         total = 0
-        for f in (stream, store):
+        for f in (stream, store, wal):
             # A file that is not there yet contributes nothing; the sum
             # only has to move, not be meaningful on its own.
             with contextlib.suppress(OSError):
-                total += f.stat().st_size
+                st = f.stat()
+                # size AND mtime: a WAL that is being overwritten in place
+                # can stay the same size while still carrying new writes.
+                total += st.st_size + int(st.st_mtime)
         return total
 
     while True:
