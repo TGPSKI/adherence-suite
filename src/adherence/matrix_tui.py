@@ -69,7 +69,9 @@ class SuiteTui(TuiApp):
         self.live_cursor = 0
         self.live_sel = ""   # out_dir the cursor is anchored to
         self.act_cursor = 0  # selected activity event, newest-first index
+        self.act_sel = ""    # its stable id -- see _anchor_act
         self.act_scroll = 0
+        self.act_follow = True   # stay pinned to newest until you move
         self.act_open = False
         # Which of the live view's three tables has the cursor. [space]
         # opens the selected row of whichever one is focused.
@@ -580,7 +582,7 @@ class SuiteTui(TuiApp):
         except Exception:
             ev = []
         ev = ev[::-1]                     # newest first
-        self.act_cursor = max(0, min(self.act_cursor, max(0, len(ev) - 1)))
+        self._anchor_act(ev)
 
         if not ev:
             self._put(y, 1, "activity", C.A_BOLD)
@@ -615,6 +617,32 @@ class SuiteTui(TuiApp):
                           f" say  {lv.preview(e, max_x - 20)}",
                           C.A_DIM if idx != self.act_cursor else base)
         self.scrollbar(y, rows, max_x - 2, len(ev), self.act_scroll)
+
+    def _anchor_act(self, ev):
+        """Resolve the activity cursor against a list that grows at the top.
+
+        The cursor is a position, and new events arrive at position 0, so
+        without this the selection walks backwards one row per event and an
+        expanded view silently swaps to a different tool call while you are
+        reading it. The id is the store's primary key, so it survives.
+
+        `act_follow` keeps the default behaviour useful: before you move,
+        the cursor tracks the newest event, which is what "what is it doing"
+        means. The first [j]/[k] pins it."""
+        if not ev:
+            self.act_cursor, self.act_sel = 0, ""
+            return
+        if self.act_follow:
+            self.act_cursor, self.act_sel = 0, ev[0]["id"]
+            return
+        idx = next((i for i, e in enumerate(ev)
+                    if e["id"] == self.act_sel), None)
+        if idx is not None:
+            self.act_cursor = idx
+        else:
+            # The selected event rolled out of the window entirely.
+            self.act_cursor = max(0, min(self.act_cursor, len(ev) - 1))
+            self.act_sel = ev[self.act_cursor]["id"]
 
     def graded_rows(self):
         """Results newest first, the order the graded table shows."""
@@ -686,7 +714,7 @@ class SuiteTui(TuiApp):
         if not ev:
             self._put(3, 3, "event no longer available", C.A_DIM)
             return
-        self.act_cursor = max(0, min(self.act_cursor, len(ev) - 1))
+        self._anchor_act(ev)
         e = ev[self.act_cursor]
 
         head = (f"#{e['n']}  {e['name']} {e['target']}"
@@ -1086,6 +1114,7 @@ class SuiteTui(TuiApp):
                 if self.live_section == 0 and self.live:
                     self.detail = True
                     self.act_cursor = self.act_scroll = 0
+                    self.act_sel, self.act_follow = "", True
                     self.act_open = False
                 elif self.live_section == 1 and self.rows or self.live_section == 2 and self.cells:
                     self.detail = True
@@ -1106,20 +1135,23 @@ class SuiteTui(TuiApp):
                 elif key == C.KEY_PPAGE:
                     self.act_scroll = max(0, self.act_scroll - 15)
                 return False
-            if key in (ord("j"), C.KEY_DOWN):
-                self.act_cursor += 1
-                return False
-            if key in (ord("k"), C.KEY_UP):
-                self.act_cursor = max(0, self.act_cursor - 1)
-                return False
-            if key == C.KEY_NPAGE:
-                self.act_cursor += 15
-                return False
-            if key == C.KEY_PPAGE:
-                self.act_cursor = max(0, self.act_cursor - 15)
+            if key in (ord("j"), C.KEY_DOWN, ord("k"), C.KEY_UP,
+                       C.KEY_NPAGE, C.KEY_PPAGE):
+                step = {ord("j"): 1, C.KEY_DOWN: 1, ord("k"): -1,
+                        C.KEY_UP: -1, C.KEY_NPAGE: 15,
+                        C.KEY_PPAGE: -15}[key]
+                # Any deliberate move pins the selection; until then it
+                # follows the newest event.
+                self.act_follow = False
+                self.act_cursor = max(0, self.act_cursor + step)
+                self.act_sel = ""        # resolved from the index next draw
                 return False
             if key in (ord(" "), 10, 13):
+                # Expanding pins the selection unconditionally. Reading one
+                # event while the list follows the newest is how the thing
+                # you opened disappears mid-sentence.
                 self.act_open, self.act_scroll = True, 0
+                self.act_follow = False
                 return False
             if key == ord("Q"):
                 return True
@@ -1152,6 +1184,7 @@ class SuiteTui(TuiApp):
                 # Open on the newest event; that is what "what is it doing"
                 # means for a run still in flight.
                 self.act_cursor = self.act_scroll = 0
+                self.act_sel, self.act_follow = "", True
                 self.act_open = False
         elif key in (ord("j"), C.KEY_DOWN):
             if VIEWS[self.view] == "live":

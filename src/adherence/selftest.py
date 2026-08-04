@@ -823,6 +823,53 @@ def check_proxy_attribution() -> list[str]:
     return problems
 
 
+def check_cursor_anchoring() -> list[str]:
+    """A cursor over a live list must follow the item, not the row.
+
+    Both live tables grow at the top: runs start and finish, and activity
+    events arrive newest-first. A positional cursor therefore walks
+    backwards one row per arrival -- and an expanded view silently swaps to
+    a different tool call while it is being read. Observed twice, once per
+    table, before either was anchored to an id."""
+    from adherence.matrix_tui import SuiteTui
+    problems = []
+
+    class Fake(SuiteTui):
+        def __init__(self):                       # no curses
+            self.act_cursor = 0
+            self.act_sel = ""
+            self.act_follow = True
+
+    def ev(ids):
+        return [{"id": i} for i in ids]
+
+    t = Fake()
+    t._anchor_act(ev(["c", "b", "a"]))
+    if t.act_sel != "c":
+        problems.append("a fresh cursor must follow the newest event")
+    t._anchor_act(ev(["d", "c", "b", "a"]))
+    if t.act_sel != "d":
+        problems.append("while following, a new event must take the cursor")
+
+    t.act_follow, t.act_cursor, t.act_sel = False, 2, ""
+    t._anchor_act(ev(["d", "c", "b", "a"]))
+    if t.act_sel != "b":
+        problems.append(f"pinning resolved to {t.act_sel!r}, expected 'b'")
+    t._anchor_act(ev(["f", "e", "d", "c", "b", "a"]))
+    if t.act_sel != "b" or t.act_cursor != 4:
+        problems.append(
+            f"after two new events the selection moved to {t.act_sel!r} at "
+            f"index {t.act_cursor}; it must stay on 'b' and slide to 4")
+
+    t._anchor_act(ev(["z", "y", "x"]))
+    if t.act_sel not in {"z", "y", "x"}:
+        problems.append("a selection that rolled out of the window must "
+                        "re-anchor, not leave the cursor dangling")
+    if t._anchor_act([]) is None and t.act_sel != "":
+        problems.append("an empty list must clear the selection")
+    return problems
+
+
 def check_analysis() -> list[str]:
     """The pre-specified analysis (docs/EVAL.md) must detect a planted
     effect, stay silent when there is none, and REFUSE when a precondition
@@ -935,6 +982,7 @@ CHECKS = (
     ("harness fault is not a model failure", check_harness_exclusion),
     ("live run reader", check_live),
     ("process hygiene", check_process_hygiene),
+    ("live cursor anchoring", check_cursor_anchoring),
     ("proxy attribution under concurrency", check_proxy_attribution),
     ("pre-specified analysis", check_analysis),
     ("stdlib test runner", check_test_runner),

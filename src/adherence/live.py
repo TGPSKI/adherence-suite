@@ -300,14 +300,14 @@ def activity(out_dir: Path, limit: int = 400) -> list[dict]:
         kids = {s for (s,) in con.execute(
             "SELECT id FROM session WHERE parent_id IS NOT NULL")}
         rows = list(con.execute(
-            "SELECT session_id, data, time_created FROM part "
+            "SELECT id, session_id, data, time_created FROM part "
             "ORDER BY time_created DESC LIMIT ?", (limit * 6,)))
         con.close()
     except Exception:
         return []
 
     out = []
-    for sid, data, ts in rows:
+    for pid, sid, data, ts in rows:
         try:
             d = json.loads(data)
         except (json.JSONDecodeError, TypeError):
@@ -319,6 +319,10 @@ def activity(out_dir: Path, limit: int = 400) -> list[dict]:
             inp = st.get("input") or {}
             body = st.get("error") or st.get("output") or ""
             out.append({
+                # The store's own primary key. A viewer anchored to a list
+                # POSITION follows "whatever is newest", so a new event
+                # arriving while you read one swaps it out from under you.
+                "id": pid,
                 "ts": ts, "who": who, "kind": "tool",
                 "name": d.get("tool") or "?",
                 "target": _target(inp),
@@ -333,7 +337,7 @@ def activity(out_dir: Path, limit: int = 400) -> list[dict]:
         elif kind == "text":
             body = (d.get("text") or "").strip()
             if body:
-                out.append({"ts": ts, "who": who, "kind": "text",
+                out.append({"id": pid, "ts": ts, "who": who, "kind": "text",
                             "name": "", "target": "", "status": "",
                             "text": _pretty(d.get("text") or ""),
                             "input": "", "failed": False})
