@@ -340,18 +340,35 @@ def wait_or_kill(proc, out_dir: Path, hard_s: int, idle_s: int):
     adapter's trap a window to convert whatever the stream captured into a
     transcript, then SIGKILL for anything that ignored it."""
     stream = out_dir / "stdout.txt"
+    # A subagent runs in its OWN opencode session, and the root stream
+    # carries none of its events -- so a trial that dispatches one and
+    # waits looks completely idle on stdout.txt for as long as the child
+    # works. Observed live: parent 0 calls, subagent 5 calls and 206,689
+    # tokens, forty tool calls deep, with the stream silent for 3m27s.
+    # Watching only the stream would kill that run as hung, and it would do
+    # it *more* to the arms that route to subagents -- which are the arms
+    # under test. Progress is either file moving.
+    store = out_dir / "xdg" / "data" / "opencode" / "opencode.db"
     t0 = time.time()
     last_size, last_change = -1, t0
+
+    def _activity_size():
+        import contextlib
+        total = 0
+        for f in (stream, store):
+            # A file that is not there yet contributes nothing; the sum
+            # only has to move, not be meaningful on its own.
+            with contextlib.suppress(OSError):
+                total += f.stat().st_size
+        return total
+
     while True:
         try:
             return proc.communicate(timeout=2.0)[1], None
         except subprocess.TimeoutExpired:
             pass
         now = time.time()
-        try:
-            size = stream.stat().st_size if stream.exists() else 0
-        except OSError:
-            size = last_size
+        size = _activity_size()
         if size != last_size:
             last_size, last_change = size, now
 
@@ -359,9 +376,9 @@ def wait_or_kill(proc, out_dir: Path, hard_s: int, idle_s: int):
         elapsed = now - t0
         why = None
         if idle_s and idle > idle_s and last_size >= 0:
-            why = (f"adapter idle {int(idle)}s (no stream activity; limit "
-                   f"{idle_s}s) after {int(elapsed)}s and {last_size:,} "
-                   f"bytes of events")
+            why = (f"adapter idle {int(idle)}s (no event-stream and no "
+                   f"session-store activity; limit {idle_s}s) after "
+                   f"{int(elapsed)}s and {last_size:,} bytes")
         elif hard_s and elapsed > hard_s:
             why = (f"adapter hit the hard ceiling of {hard_s}s while still "
                    f"active ({last_size:,} bytes of events, last advanced "

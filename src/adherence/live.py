@@ -245,6 +245,41 @@ def _subagents(out_dir: Path, root_session: str) -> dict:
             "calls": calls, "tok_in": tok_in, "tok_out": tok_out}
 
 
+MAX_BODY = 20000
+
+
+def _pretty(body) -> str:
+    """Readable text for an expanded event.
+
+    Two jobs. Keep the line structure -- a file listing, a diff and a stack
+    trace are mostly structure, and joining them into one paragraph throws
+    away the thing being read. And re-indent JSON: a tool's input arrives
+    as a dict and its output is often a serialized blob, both of which are
+    a wall on one line and obvious over twelve."""
+    if isinstance(body, (dict, list)):
+        try:
+            return json.dumps(body, indent=2)[:MAX_BODY]
+        except (TypeError, ValueError):
+            return str(body)[:MAX_BODY]
+    text = str(body or "")
+    stripped = text.strip()
+    if stripped[:1] in "[{" and stripped[-1:] in "]}":
+        try:
+            return json.dumps(json.loads(stripped), indent=2)[:MAX_BODY]
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return text.replace("\r\n", "\n").replace("\r", "\n")[:MAX_BODY]
+
+
+def preview(e: dict, width: int) -> str:
+    """One line for the list: the first non-empty line of the body."""
+    for ln in (e.get("text") or "").splitlines():
+        ln = ln.strip()
+        if ln:
+            return ln[:width]
+    return ""
+
+
 def activity(out_dir: Path, limit: int = 400) -> list[dict]:
     """The trial's recent events, with tool output.
 
@@ -288,15 +323,20 @@ def activity(out_dir: Path, limit: int = 400) -> list[dict]:
                 "name": d.get("tool") or "?",
                 "target": _target(inp),
                 "status": st.get("status") or "",
-                "text": " ".join(str(body).split())[:8000],
+                # Structure preserved. Collapsing whitespace made every
+                # JSON blob and every file listing one unreadable line --
+                # and structure is most of what a tool result IS.
+                "text": _pretty(body),
+                "input": _pretty(inp) if inp else "",
                 "failed": bool(st.get("error")),
             })
         elif kind == "text":
-            body = " ".join((d.get("text") or "").split())
+            body = (d.get("text") or "").strip()
             if body:
                 out.append({"ts": ts, "who": who, "kind": "text",
                             "name": "", "target": "", "status": "",
-                            "text": body[:8000], "failed": False})
+                            "text": _pretty(d.get("text") or ""),
+                            "input": "", "failed": False})
     out.sort(key=lambda e: e["ts"])
     out = out[-limit:]
     # Absolute position in the run, counted from the start. A reader
@@ -369,9 +409,13 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
         # transcript.jsonl is written after the harness returns, so its
         # presence means the agent is done and grading is under way.
         graded = (p / "transcript.jsonl").is_file()
+        # Same reason as runner.wait_or_kill: the root stream goes silent
+        # for the whole time a subagent is working, so a delegating trial
+        # reads as stalled when it is the busiest thing on the machine.
+        store = p / "xdg" / "data" / "opencode" / "opencode.db"
         try:
             touched = max(os.path.getmtime(x) for x in
-                          (stdout, p) if os.path.exists(x))
+                          (stdout, store, p) if os.path.exists(x))
         except (OSError, ValueError):
             touched = 0.0
         age = now - touched if touched else 1e9

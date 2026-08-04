@@ -32,13 +32,15 @@ from adherence.tui.framework import TuiApp, curses_main
 
 VIEWS = ("live", "cells", "arms", "cost", "calib")
 VIEW_HELP = {
-    "live": "runs in flight, read off their streams — [space] opens detail",
+    "live": "[h/l] section · [j/k] row · [space] detail — running, graded, "
+            "per arm×scenario",
     "cells": "every (arm, scenario) cell — [space] opens detail",
     "arms": "per-arm rollup; ratios are paired on scenario, geometric",
     "cost": "pass rate vs tokens — ★ is the Pareto frontier (§5)",
     "calib": "adapter vs proxy per run; >2% fails the H4 gate (§3.2)",
 }
 SORTS = ("tag", "pass", "tok")
+SECTIONS = ("running", "graded", "summary")
 GATE = 0.02          # H4 tolerance
 
 
@@ -69,6 +71,11 @@ class SuiteTui(TuiApp):
         self.act_cursor = 0  # selected activity event, newest-first index
         self.act_scroll = 0
         self.act_open = False
+        # Which of the live view's three tables has the cursor. [space]
+        # opens the selected row of whichever one is focused.
+        self.live_section = 0            # 0 running, 1 graded, 2 summary
+        self.graded_cursor = 0
+        self.sum_cursor = 0
         self.proxy_rows = []
         self.stamp = 0.0
         self.seen_mtime = 0.0
@@ -211,12 +218,22 @@ class SuiteTui(TuiApp):
     def footer(self, max_y, max_x, total, avail):
         C = self.curses
         n_live = sum(1 for r in self.live if r["state"] == "running")
+        live_v = VIEWS[self.view] == "live"
+        # Depth decides what q does, so the footer says which one it is.
+        if self.act_open:
+            back = ("[q] back to activity", C.A_BOLD)
+        elif self.detail:
+            back = ("[q] back to list", C.A_BOLD)
+        else:
+            back = ("[q] quit", C.A_DIM)
         keys = [("[tab] view", C.A_DIM),
-                (f"[L] live·{n_live}", C.color_pair(2) if n_live else C.A_DIM),
-                ("[s] sort", C.A_DIM),
-                ("[/] filter", C.A_DIM), ("[F] clear", C.A_DIM),
-                ("[p] pick", C.A_DIM), ("[space] detail", C.A_DIM),
-                ("[r] reload", C.A_DIM), ("[q] quit", C.A_DIM)]
+                (f"[L] live·{n_live}", C.color_pair(2) if n_live else C.A_DIM)]
+        if live_v and not self.detail:
+            keys.append((f"[h/l] section: {SECTIONS[self.live_section]}",
+                         C.color_pair(5)))
+        keys += [("[s] sort", C.A_DIM), ("[/] filter", C.A_DIM),
+                 ("[p] pick", C.A_DIM), ("[space] detail", C.A_DIM),
+                 ("[r] reload", C.A_DIM), back, ("[Q] quit", C.A_DIM)]
         if self.editing:
             keys = [("type a filter · [enter] apply · [esc] cancel", C.A_BOLD)]
         self.render_footer_items(max_y, keys)
@@ -242,7 +259,17 @@ class SuiteTui(TuiApp):
             # results-side idea (arm/scenario cells), and silently hiding a
             # running job because of it would be the worst possible
             # behaviour for a monitor.
-            if self.detail and self.live:
+            if self.detail and self.live_section == 1 and self.rows:
+                rows = self.graded_rows()
+                self.graded_cursor = max(0, min(self.graded_cursor,
+                                                len(rows) - 1))
+                self.view_result_detail(rows[self.graded_cursor],
+                                        max_y, max_x)
+            elif self.detail and self.live_section == 2 and self.cells:
+                cs = sd.load_cells(paths=self.files)
+                self.sum_cursor = max(0, min(self.sum_cursor, len(cs) - 1))
+                self.view_detail(cs[self.sum_cursor], max_y, max_x)
+            elif self.detail and self.live:
                 self.live_cursor = max(0, min(self.live_cursor,
                                               len(self.live) - 1))
                 self.view_live_detail(self.live[self.live_cursor],
@@ -465,6 +492,11 @@ class SuiteTui(TuiApp):
                 y += 1
 
         info = r["info"]
+        if self.act_open:
+            # The expanded event gets the whole pane. Keeping the run block
+            # on screen left about eight lines for the thing being read.
+            self.view_event(r, max_y, max_x)
+            return
         line("scenario", r["scenario"], C.A_BOLD)
         line("arm / trial", f"{r['arm']} / "
                             f"{r['trial'] if r['trial'] >= 0 else '?'}"
@@ -555,38 +587,6 @@ class SuiteTui(TuiApp):
             self._put(y + 1, 3, "nothing recorded yet", C.A_DIM)
             return
 
-        sel = ev[self.act_cursor]
-        if self.act_open:
-            # Expanded: the selected event takes the whole remaining pane.
-            head = (f"#{sel['n']}  {sel['name']} {sel['target']}"
-                    if sel["kind"] == "tool" else f"#{sel['n']}  message")
-            self._put(y, 1, head[:max_x - 2],
-                      C.color_pair(4) if sel["failed"] else C.A_BOLD)
-            hint = f"{sel['who']}  {sel['status']}  [space] closes"
-            self._put(y, max(0, max_x - len(hint) - 3), hint, C.A_DIM)
-            y += 1
-            body_lines = []
-            width = max_x - 6
-            for para in sel["text"].split("\n"):
-                cur = ""
-                for word in para.split():
-                    if len(cur) + len(word) + 1 > width:
-                        body_lines.append(cur)
-                        cur = word
-                    else:
-                        cur = f"{cur} {word}".strip()
-                body_lines.append(cur)
-            rows = max_y - y - 2
-            self.act_scroll = max(0, min(self.act_scroll,
-                                         max(0, len(body_lines) - rows)))
-            window = body_lines[self.act_scroll:self.act_scroll + rows]
-            for i, ln in enumerate(window):
-                self._put(y + i, 3, ln[:width],
-                          C.color_pair(4) if sel["failed"] else 0)
-            self.scrollbar(y, rows, max_x - 2, len(body_lines),
-                           self.act_scroll)
-            return
-
         self._put(y, 1, f"activity — newest first, {len(ev)} events",
                   C.A_BOLD)
         hint = "[j/k] move  [space] open  [q] back"
@@ -611,9 +611,122 @@ class SuiteTui(TuiApp):
                 self._put(y + i, 11, f"{mark}{label}"[:max_x - 15],
                           C.color_pair(4) if e["failed"] else base)
             else:
-                self._put(y + i, 11, f" say  {e['text'][:max_x - 20]}",
+                self._put(y + i, 11,
+                          f" say  {lv.preview(e, max_x - 20)}",
                           C.A_DIM if idx != self.act_cursor else base)
         self.scrollbar(y, rows, max_x - 2, len(ev), self.act_scroll)
+
+    def graded_rows(self):
+        """Results newest first, the order the graded table shows."""
+        return sorted(self.rows, key=lambda r: r.get("_seq", 0))[::-1]
+
+    def view_result_detail(self, r, max_y, max_x):
+        """One graded trial: every check with its evidence.
+
+        The graded table can only fit check *names*; the evidence is where
+        a fail is actually explained -- which test command ran, what it
+        printed, which files the agent touched against the real diff."""
+        C = self.curses
+        m = r.get("metrics") or {}
+        self._put(3, 1, f"{r['scenario']}   arm {r.get('arm', '-')}   "
+                        f"trial {r['trial']}", C.A_BOLD)
+        ung = any(c.get("name") == "adapter" and c.get("status") != "pass"
+                  for c in r["checks"])
+        verdict = ("ungradeable — harness fault, excluded from pass rates"
+                   if ung else "pass" if r["all_pass"] else "fail")
+        self._put(4, 1, verdict, C.color_pair(3) if ung
+                  else C.color_pair(1) if r["all_pass"] else C.color_pair(4))
+        facts = [
+            ("duration", sd.fmt_duration(r.get("duration_s", 0))),
+            ("calls", f"{m.get('calls', 0)}  "
+                      f"({m.get('subagent_calls', 0)} in subagents)"),
+            ("tok_in billed", f"{m.get('tok_in_billed', 0):,}"),
+            ("tok_in marginal", f"{m.get('tok_in_marginal', 0):,}"),
+            ("first call input", f"{m.get('first_call_input', 0):,}"),
+            ("probes to 1st edit", f"{m.get('probes_to_first_edit', 0)}"),
+            ("first edit", str(m.get("first_edit") or "—")[:max_x - 32]),
+            ("purpose", r.get("purpose", "(unlabelled)")),
+            ("schema errors", ", ".join(r.get("schema_errors") or []) or "none"),
+        ]
+        y = 6
+        for k, v in facts:
+            self._put(y, 3, f"{k:<22}", C.A_DIM)
+            self._put(y, 26, v)
+            y += 1
+        y += 1
+        self._put(y, 1, "checks", C.A_BOLD)
+        y += 1
+        for c in r["checks"]:
+            if y >= max_y - 2:
+                break
+            col = (C.color_pair(1) if c["status"] == "pass" else
+                   C.color_pair(4) if c["status"] == "fail" else C.A_DIM)
+            self._put(y, 3, f"{c['status']:<12}", col)
+            self._put(y, 16, c["name"])
+            y += 1
+            ev = " ".join(str(c.get("evidence", "")).split())
+            width = max_x - 22
+            while ev and y < max_y - 2:
+                self._put(y, 20, ev[:width], C.A_DIM)
+                ev = ev[width:]
+                y += 1
+
+    def view_event(self, r, max_y, max_x):
+        """One activity event, full pane, structure intact.
+
+        Wraps long lines but keeps the author's own line breaks and their
+        leading indentation: a continuation is indented past the original
+        so a wrapped line is never mistaken for a new one. JSON arrives
+        pre-indented from live._pretty."""
+        C = self.curses
+        try:
+            ev = lv.activity(Path(r["out_dir"]))[::-1]
+        except Exception:
+            ev = []
+        if not ev:
+            self._put(3, 3, "event no longer available", C.A_DIM)
+            return
+        self.act_cursor = max(0, min(self.act_cursor, len(ev) - 1))
+        e = ev[self.act_cursor]
+
+        head = (f"#{e['n']}  {e['name']} {e['target']}"
+                if e["kind"] == "tool" else f"#{e['n']}  message")
+        self._put(3, 1, head[:max_x - 2],
+                  C.color_pair(4) if e["failed"] else C.A_BOLD)
+        meta = (f"{r['scenario']} {r['arm']}/{r['trial']}   {e['who']}"
+                f"   {e['status']}   [j/k] scroll  [space] back")
+        self._put(4, 1, meta[:max_x - 2], C.A_DIM)
+
+        width = max_x - 6
+        lines = []
+        for raw in e["text"].splitlines():
+            indent = len(raw) - len(raw.lstrip())
+            pad = " " * min(indent, 12)
+            body = raw.strip()
+            if not body:
+                lines.append("")
+                continue
+            cur = pad
+            for word in body.split():
+                if len(cur) + len(word) + 1 > width and cur.strip():
+                    lines.append(cur)
+                    cur = pad + "  " + word      # continuation, indented
+                else:
+                    cur = f"{cur} {word}" if cur.strip() else pad + word
+            if cur.strip():
+                lines.append(cur)
+
+        y0 = 6
+        rows = max_y - y0 - 2
+        self.act_scroll = max(0, min(self.act_scroll,
+                                     max(0, len(lines) - rows)))
+        for i, ln in enumerate(lines[self.act_scroll:self.act_scroll + rows]):
+            self._put(y0 + i, 3, ln[:width],
+                      C.color_pair(4) if e["failed"] else 0)
+        self.scrollbar(y0, rows, max_x - 2, len(lines), self.act_scroll)
+        pos = f"{self.act_scroll + 1}-{min(self.act_scroll + rows, len(lines))}" \
+              f"/{len(lines)} lines"
+        self._put(max_y - 2, max(0, max_x - len(pos) - 3), pos, C.A_DIM)
 
     def view_cells(self, cs, body, max_x):
         C = self.curses
@@ -936,7 +1049,13 @@ class SuiteTui(TuiApp):
                 return True
             return False
 
-        if key in (ord("q"), ord("Q"), 27):
+        # One rule everywhere: [q]/[esc] back out one level, [Q] quits from
+        # any depth. `q` used to mean both, so from inside a nested view
+        # there was no way to leave without pressing it repeatedly and no
+        # way to know whether the next press would exit the program.
+        if key == ord("Q"):
+            return True
+        if key in (ord("q"), 27):
             if self.detail:
                 self.detail = False
                 return False
@@ -944,9 +1063,38 @@ class SuiteTui(TuiApp):
         # The live view nests: run list -> run detail with an activity
         # list -> one expanded event. Each level consumes its own keys so
         # [q] backs out one step instead of quitting from three levels deep.
+        if VIEWS[self.view] == "live" and not self.detail:
+            if key in (ord("l"), C.KEY_RIGHT):
+                self.live_section = (self.live_section + 1) % 3
+                return False
+            if key in (ord("h"), C.KEY_LEFT):
+                self.live_section = (self.live_section - 1) % 3
+                return False
+            if key in (ord("j"), C.KEY_DOWN, ord("k"), C.KEY_UP):
+                step = 1 if key in (ord("j"), C.KEY_DOWN) else -1
+                if self.live_section == 0:
+                    self.live_cursor = max(0, self.live_cursor + step)
+                    self._anchor_live()
+                elif self.live_section == 1:
+                    self.graded_cursor = max(0, self.graded_cursor + step)
+                else:
+                    self.sum_cursor = max(0, self.sum_cursor + step)
+                return False
+            if key in (ord(" "), 10, 13):
+                # Each table opens its own kind of detail: a live run, a
+                # graded result, or the cell's distribution.
+                if self.live_section == 0 and self.live:
+                    self.detail = True
+                    self.act_cursor = self.act_scroll = 0
+                    self.act_open = False
+                elif self.live_section == 1 and self.rows or self.live_section == 2 and self.cells:
+                    self.detail = True
+                return False
         if VIEWS[self.view] == "live" and self.detail:
             if self.act_open:
-                if key in (ord(" "), 10, 13, ord("q"), ord("Q"), 27):
+                if key == ord("Q"):
+                    return True          # Q quits from any depth
+                if key in (ord(" "), 10, 13, ord("q"), 27):
                     self.act_open = False
                     self.act_scroll = 0
                 elif key in (ord("j"), C.KEY_DOWN):
@@ -973,7 +1121,9 @@ class SuiteTui(TuiApp):
             if key in (ord(" "), 10, 13):
                 self.act_open, self.act_scroll = True, 0
                 return False
-            if key in (ord("q"), ord("Q"), 27):
+            if key == ord("Q"):
+                return True
+            if key in (ord("q"), 27):
                 self.detail = False
                 self.act_cursor = self.act_scroll = 0
                 return False
