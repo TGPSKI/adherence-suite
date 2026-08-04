@@ -277,17 +277,29 @@ class SuiteTui(TuiApp):
             y += 1
 
         def wrapped(label, text, limit=6):
+            """Wrap for the terminal while keeping the author's own line
+            breaks. A task prompt is a PR body -- headings, tables, bullet
+            lists -- and flattening it to one whitespace-separated blob
+            destroys exactly the structure that makes it readable."""
             nonlocal y
             self._put(y, 1, f"{label:<16}", C.A_DIM)
-            words, cur, out = str(text).split(), "", []
-            for word in words:
-                if len(cur) + len(word) + 1 > w - 18:
+            out, width = [], max(20, w - 18)
+            for para in str(text).replace("\r", "").split("\n"):
+                if not para.strip():
+                    out.append("")
+                    continue
+                cur = ""
+                for word in para.split():
+                    if len(cur) + len(word) + 1 > width:
+                        out.append(cur)
+                        cur = word
+                    else:
+                        cur = f"{cur} {word}".strip()
+                if cur:
                     out.append(cur)
-                    cur = word
-                else:
-                    cur = f"{cur} {word}".strip()
-            if cur:
-                out.append(cur)
+            # Leading/trailing blanks carry no information on a fixed budget.
+            while out and not out[0]:
+                out.pop(0)
             for ln in out[:limit]:
                 if y >= max_y - 2:
                     return

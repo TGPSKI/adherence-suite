@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 from adherence import REPO_ROOT, analyze, gradelib, metrics, schema
@@ -645,6 +646,73 @@ def check_live() -> list[str]:
     return problems
 
 
+def check_process_hygiene() -> list[str]:
+    """A killed trial must not leave the GPU occupied.
+
+    `subprocess.run(timeout=...)` kills only the process it started. The
+    adapter is a shell script, so the thing holding the GPU is a
+    grandchild -- and it was surviving every timeout, getting reparented,
+    and running to completion with nobody left to read its output. Measured
+    on a --jobs 3 probe: two orphans still running twenty minutes later,
+    contending with three live trials for three slots. That is a spiral,
+    not a leak: each timeout permanently shrinks the pool, so more trials
+    time out.
+
+    Also checks the escape/unescape pair, because the writer and the
+    reader disagreeing is how 168 literal backslash-n reached everything
+    that read a prompt."""
+    import os as _os
+    import signal as _sig
+    import subprocess as _sp
+
+    from adherence import mkscenarios
+    from adherence.runner import _unescape, kill_process_group
+    problems = []
+
+    # --- the grandchild must die with the group ------------------------
+    if _os.name == "posix":
+        # bash (the "adapter") spawns a long sleep (the "harness") and
+        # waits. Killing only the direct child leaves the sleep running.
+        proc = _sp.Popen(["bash", "-c", "sleep 300 & echo $! ; wait"],
+                         stdout=_sp.PIPE, stderr=_sp.PIPE, text=True,
+                         start_new_session=True)
+        try:
+            grandchild = int((proc.stdout.readline() or "0").strip())
+        except ValueError:
+            grandchild = 0
+        time.sleep(0.3)
+        leaked = kill_process_group(proc, grace=2.0)
+        time.sleep(0.3)
+        if leaked:
+            problems.append(f"{leaked} process(es) survived the group kill")
+        if grandchild:
+            try:
+                _os.kill(grandchild, 0)
+                problems.append(
+                    f"grandchild {grandchild} survived the kill -- this is "
+                    f"the orphan that holds the GPU after a timeout")
+                _os.kill(grandchild, _sig.SIGKILL)
+            except ProcessLookupError:
+                pass                      # correct: it died with the group
+        proc.wait(timeout=5)
+
+    # --- escape and unescape must round-trip ---------------------------
+    for original in ("one\ntwo\nthree",
+                     'quoted "thing" and a back\\slash',
+                     "# Heading\n\n| a | b |\n|---|---|\n",
+                     "no special characters at all"):
+        if _unescape(mkscenarios.yaml_escape(original)) != original:
+            problems.append(
+                f"escape/unescape did not round-trip {original[:40]!r}; the "
+                f"writer and the reader must agree or every consumer of a "
+                f"prompt sees the escaped form")
+    # And the escaped form must be a single line, which is the whole point.
+    if "\n" in mkscenarios.yaml_escape("a\nb"):
+        problems.append("yaml_escape left a real newline in its output; "
+                        "scenario.yaml is a one-line-per-key format")
+    return problems
+
+
 def check_analysis() -> list[str]:
     """The pre-specified analysis (docs/EVAL.md) must detect a planted
     effect, stay silent when there is none, and REFUSE when a precondition
@@ -756,6 +824,7 @@ CHECKS = (
     ("validation/experiment isolation", check_purpose_isolation),
     ("harness fault is not a model failure", check_harness_exclusion),
     ("live run reader", check_live),
+    ("process hygiene", check_process_hygiene),
     ("pre-specified analysis", check_analysis),
     ("stdlib test runner", check_test_runner),
     ("fixture noise filter", check_noise_filter),

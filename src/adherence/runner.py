@@ -19,6 +19,7 @@ import importlib.util
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -36,6 +37,48 @@ ROOT = REPO_ROOT
 # it is. Read by adherence.live; nothing in the measurement path depends
 # on it, so a viewer can never perturb a run.
 RUN_MARKER = ".adh-run.json"
+
+# Every adapter this process started and has not yet reaped. A Ctrl-C or a
+# crash used to leave the whole tree running -- reparented to systemd,
+# holding the GPU, invisible to the next run except as unexplained
+# slowness. Reaped by _reap_all via atexit and the signal handlers.
+_LIVE_PROCS: set = set()
+
+# Each trial stamps this into the environment it hands the adapter, so
+# every process it spawns inherits it. That makes a stray attributable to
+# the exact (scenario, arm, trial) that leaked it, rather than to
+# "something opencode-ish is running".
+RUN_ID_VAR = "ADH_RUN_ID"
+
+# No stream activity for this long means stuck, not slow. Generous enough
+# that a long inference call is never mistaken for a hang.
+DEFAULT_IDLE_TIMEOUT = 300
+
+
+def _unescape(v: str) -> str:
+    r"""Reverse mkscenarios.yaml_escape: \\, \" and \n.
+
+    The escape and the unescape are a matched pair and belong in the same
+    place. They were not: the writer escaped, and only the one call site
+    that wrote prompt.txt unescaped, so `load_yamlish` handed every other
+    caller a prompt with 168 literal backslash-n in it. The agent was fine;
+    anything that displayed or measured the prompt was not."""
+    out, i = [], 0
+    while i < len(v):
+        c = v[i]
+        if c == "\\" and i + 1 < len(v):
+            nxt = v[i + 1]
+            if nxt == "n":
+                out.append("\n")
+                i += 2
+                continue
+            if nxt in ('"', "\\"):
+                out.append(nxt)
+                i += 2
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def load_yamlish(path: Path) -> dict:
@@ -57,7 +100,8 @@ def load_yamlish(path: Path) -> dict:
                 cur_list = k
             else:
                 cur_list = None
-                data[k] = int(v) if v.isdigit() else v.strip('"')
+                data[k] = (int(v) if v.isdigit()
+                           else _unescape(v.strip('"')))
     return data
 
 
@@ -204,6 +248,247 @@ def materialize(scen_dir: Path, sandbox: Path, meta: dict) -> None:
     git(sandbox, "init -q")
 
 
+def _reap_all(*_a):
+    """Kill every adapter tree this process started, then exit.
+
+    Without it, Ctrl-C killed the runner and left its opencode grandchildren
+    running. `pkill -f adherence.runner` did the same thing, which is how
+    two orphans came to be contending with three live trials for the GPU."""
+    procs, _LIVE_PROCS_copy = list(_LIVE_PROCS), None
+    for p in procs:
+        if p.poll() is None:
+            kill_process_group(p, grace=3.0)
+    if _a:                                   # arrived as a signal
+        sys.exit(130)
+
+
+def install_reapers() -> None:
+    import atexit
+    import contextlib
+    atexit.register(_reap_all)
+    if os.name == "posix":
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            # A signal that cannot be installed (already handled, or not a
+            # main thread) is not worth failing a run over.
+            with contextlib.suppress(OSError, ValueError):
+                signal.signal(sig, _reap_all)
+
+
+def wait_or_kill(proc, out_dir: Path, hard_s: int, idle_s: int):
+    """Wait for the adapter, killing it only for a reason worth killing for.
+
+    A plain wall-clock deadline cannot tell a hung run from a working one.
+    Measured: trials were being killed at 900s while 110 inference calls
+    deep and still advancing -- productive work, discarded, and recorded as
+    `calls=0` because the adapter writes its transcript at the end. The
+    number in the results file said the run did nothing. It had done more
+    than any run that completed.
+
+    So there are two deadlines, and they mean different things:
+
+      idle_s  no new bytes on the event stream for this long. The agent is
+              genuinely stuck -- a hung request, a wedged tool -- and the
+              wall clock is the right thing to stop.
+      hard_s  a ceiling on total wall time, so a run that loops forever
+              while looking busy still ends. Deliberately generous,
+              because being wrong here throws away real work.
+
+    On kill: SIGTERM to the whole process group first, which gives the
+    adapter's trap a window to convert whatever the stream captured into a
+    transcript, then SIGKILL for anything that ignored it."""
+    stream = out_dir / "stdout.txt"
+    t0 = time.time()
+    last_size, last_change = -1, t0
+    while True:
+        try:
+            return proc.communicate(timeout=2.0)[1], None
+        except subprocess.TimeoutExpired:
+            pass
+        now = time.time()
+        try:
+            size = stream.stat().st_size if stream.exists() else 0
+        except OSError:
+            size = last_size
+        if size != last_size:
+            last_size, last_change = size, now
+
+        idle = now - last_change
+        elapsed = now - t0
+        why = None
+        if idle_s and idle > idle_s and last_size >= 0:
+            why = (f"adapter idle {int(idle)}s (no stream activity; limit "
+                   f"{idle_s}s) after {int(elapsed)}s and {last_size:,} "
+                   f"bytes of events")
+        elif hard_s and elapsed > hard_s:
+            why = (f"adapter hit the hard ceiling of {hard_s}s while still "
+                   f"active ({last_size:,} bytes of events, last advanced "
+                   f"{int(idle)}s ago)")
+        if not why:
+            continue
+
+        leaked = kill_process_group(proc)
+        try:
+            err = proc.communicate(timeout=30)[1]
+        except subprocess.TimeoutExpired:
+            err = ""
+        if leaked:
+            why += f"; {leaked} process(es) survived the group kill"
+        return err, why
+
+
+def kill_process_group(proc, grace: float = 10.0) -> int:
+    """Kill the adapter and everything it spawned. Returns survivors.
+
+    `subprocess.run(timeout=...)` kills only the process it started. The
+    adapter is a shell script, so the thing actually holding the GPU is a
+    *grandchild* -- and on timeout it was surviving, getting reparented to
+    the user's systemd, and running to completion with nobody left to read
+    its output.
+
+    That is not a slow leak, it is a spiral: every timeout permanently
+    removes a slot's worth of GPU from the pool, so the remaining trials
+    get slower, so more of them time out. Measured on a --jobs 3 probe:
+    three timeouts left two orphans still running twenty minutes later,
+    against three live trials -- five processes contending for three
+    slots, and the run was steadily starving itself.
+
+    SIGTERM to the whole group first so opencode can flush, then SIGKILL
+    to whatever ignored it."""
+    if os.name != "posix":
+        # No process groups: kill what we can and report honestly rather
+        # than pretending the tree is gone.
+        proc.kill()
+        return 0
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        return 0
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return 0
+        except OSError:
+            break
+        deadline = time.time() + (grace if sig == signal.SIGTERM else 5.0)
+        while time.time() < deadline:
+            proc.poll()                 # reap the direct child as it dies
+            if not group_members(pgid):
+                return 0
+            time.sleep(0.2)
+    proc.poll()
+    return len(group_members(pgid))
+
+
+def group_members(pgid: int) -> list[int]:
+    """Live, non-zombie pids in a process group.
+
+    `os.killpg(pgid, 0)` is the obvious check and it is wrong here: a
+    zombie is still a group member, so an un-reaped direct child makes a
+    fully-killed group look alive. The suite's own hygiene test caught
+    exactly that, reporting a leak that was really just a corpse waiting
+    to be waited on."""
+    out = []
+    try:
+        pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    except OSError:
+        # No procfs: fall back to the coarse check, zombies and all.
+        try:
+            os.killpg(pgid, 0)
+            return [pgid]
+        except OSError:
+            return []
+    for pid in pids:
+        try:
+            with open(f"/proc/{pid}/stat") as f:
+                stat = f.read()
+        except OSError:
+            continue
+        # comm can contain spaces and parens; everything after the last
+        # ')' is positional. state is the first field after it, pgrp the
+        # third.
+        tail = stat.rpartition(")")[2].split()
+        if len(tail) < 3:
+            continue
+        if tail[0] == "Z":              # a corpse holds no GPU
+            continue
+        try:
+            if int(tail[2]) == pgid:
+                out.append(pid)
+        except ValueError:
+            continue
+    return out
+
+
+def strays(pattern: str = "opencode run") -> list[tuple[int, str]]:
+    """Processes matching `pattern` that no live adapter owns.
+
+    A previous run's leaked children are indistinguishable from load: the
+    GPU is busy, trials are slow, and nothing in the results says why.
+    Checked at startup so a poisoned run is refused rather than measured."""
+    if os.name != "posix":
+        return []
+    try:
+        out = subprocess.run(
+            ["ps", "-eo", "pid,ppid,etimes,args"],
+            capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    live_pids = set()
+    rows = []
+    for line in out.splitlines()[1:]:
+        parts = line.split(None, 3)
+        if len(parts) < 4:
+            continue
+        pid, ppid, etimes, args = parts
+        try:
+            pid, ppid, etimes = int(pid), int(ppid), int(etimes)
+        except ValueError:
+            continue
+        live_pids.add(pid)
+        rows.append((pid, ppid, etimes, args))
+    out_rows = []
+    for pid, ppid, etimes, args in rows:
+        # `--adapter adapters/opencode.sh` on the runner's own command line
+        # matches a bare "opencode"; require the harness invocation itself.
+        if pattern not in args or " -eo " in args:
+            continue
+        if "adherence.runner" in args or "isolate.sh" in args:
+            continue
+        rid = run_id_of(pid)
+        # Owned by a live adapter/runner? then it is someone's current work.
+        parent = next((r for r in rows if r[0] == ppid), None)
+        if parent and ("adapters/" in parent[3] or "adherence.runner" in parent[3]):
+            continue
+        if ppid in live_pids and parent and pattern in parent[3]:
+            continue                      # a child of another matching proc
+        # The run id says which trial leaked it, which is the difference
+        # between "kill something opencode-ish" and "this a3/trial-2 run
+        # from the probe never died".
+        label = f"{etimes}s"
+        if rid:
+            label += f"  run={rid}"
+        out_rows.append((pid, f"{label}  {args[:60]}"))
+    return out_rows
+
+
+def run_id_of(pid: int) -> str:
+    """The trial that spawned this process, from its own environment.
+
+    Children inherit ADH_RUN_ID, so this attributes a stray to an exact
+    (scenario, arm, trial) rather than leaving it as an anonymous process
+    someone has to guess about. Linux-only; absent elsewhere, which costs
+    a label and nothing else."""
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            for kv in f.read().split(b"\0"):
+                if kv.startswith(RUN_ID_VAR.encode() + b"="):
+                    return kv.split(b"=", 1)[1].decode("utf-8", "replace")
+    except OSError:
+        pass
+    return ""
+
+
 def require_arms_dir(scen_dir: Path, meta: dict, arm: str, arms_dir) -> None:
     """A fixture-backed scenario with a named arm needs the arm's files.
 
@@ -283,10 +568,15 @@ def load_grader(scen_dir: Path):
 def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
             arm: str = "-", trial: int = 0, floor: int = 0,
             arms_dir: Path | None = None, parallel: bool = False,
-            timeout_override: int = 0, purpose: str = "validation") -> dict:
+            timeout_override: int = 0, purpose: str = "validation",
+            idle_timeout: int = DEFAULT_IDLE_TIMEOUT) -> dict:
     meta = load_yamlish(scen_dir / "scenario.yaml")
     sandbox = Path(tempfile.mkdtemp(prefix=f"adh-{scen_dir.name}-"))
     out_dir = Path(tempfile.mkdtemp(prefix=f"adh-out-{scen_dir.name}-"))
+    # Identifies every process this trial spawns. Derived from the out-dir
+    # name, which is already unique, so it survives in ps output and in
+    # the marker without a second source of truth.
+    run_id = f"{scen_dir.name}|{arm}|{trial}|{out_dir.name.rsplit('-', 1)[-1]}"
 
     # Declare the run before doing any of it. Sandbox and out-dir get
     # independent random suffixes, and neither name carries the arm or the
@@ -295,6 +585,7 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
     # first, so it covers a run that dies during setup.
     (out_dir / RUN_MARKER).write_text(json.dumps({
         "scenario": scen_dir.name, "arm": arm, "trial": trial,
+        "run_id": run_id,
         "model": model, "adapter": adapter.name,
         "sandbox": str(sandbox), "pid": os.getpid(),
         "timeout": int(timeout_override or meta.get("timeout", 1800)),
@@ -327,7 +618,9 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
                  "--allow-empty")
 
     prompt_file = out_dir / "prompt.txt"
-    prompt_file.write_text(meta["prompt"].replace("\\n", "\n"))
+    # load_yamlish already unescaped; doing it again here would corrupt a
+    # prompt that legitimately contains a backslash.
+    prompt_file.write_text(meta["prompt"])
 
     proxy_mark(f"{scen_dir.name}|{arm}|{trial}", parallel)
     t0 = time.time()
@@ -349,15 +642,21 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
             d = out_dir / "xdg" / sub
             d.mkdir(parents=True, exist_ok=True)
             env[var] = str(d)
+    # start_new_session puts the adapter in its own process group so a
+    # deadline can kill everything it spawned. See kill_process_group.
+    env["ADH_RUN_ID"] = run_id
+    proc = subprocess.Popen(
+        [str(adapter), str(sandbox), model, str(prompt_file), str(out_dir),
+         target_agent],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        **({"start_new_session": True} if os.name == "posix" else {}))
+    _LIVE_PROCS.add(proc)
     try:
-        proc = subprocess.run(
-            [str(adapter), str(sandbox), model, str(prompt_file), str(out_dir),
-             target_agent],
-            capture_output=True, text=True, timeout=timeout, env=env)
-        adapter_ok = proc.returncode == 0
-        adapter_err = proc.stderr[-2000:]
-    except subprocess.TimeoutExpired:
-        adapter_ok, adapter_err = False, f"adapter timeout after {timeout}s"
+        err, why = wait_or_kill(proc, out_dir, timeout, idle_timeout)
+    finally:
+        _LIVE_PROCS.discard(proc)
+    adapter_ok = why is None and proc.returncode == 0
+    adapter_err = why or (err or "")[-2000:]
     duration = time.time() - t0
 
     transcript = gradelib.load_transcript(out_dir / "transcript.jsonl")
@@ -464,6 +763,18 @@ def main():
     ap.add_argument("--strict-schema", action="store_true",
                     help="abort on the first schema violation instead of "
                          "warning; use in CI")
+    ap.add_argument("--idle-timeout", type=int, default=DEFAULT_IDLE_TIMEOUT,
+                    help="kill a trial after this many seconds with NO event "
+                         "stream activity (default: %(default)s). This is "
+                         "the deadline that means 'stuck'; --timeout is a "
+                         "ceiling on total wall time and should be generous, "
+                         "because a run that is still making calls is doing "
+                         "work that a kill throws away. 0 disables.")
+    ap.add_argument("--allow-strays", action="store_true",
+                    help="start even when unowned harness processes are "
+                         "running. They contend for the GPU, so durations "
+                         "and timeouts measured alongside them are not "
+                         "comparable to a clean run")
     args = ap.parse_args()
 
     suite = load_yamlish(ROOT / args.suite)
@@ -475,6 +786,23 @@ def main():
     adapter = Path(args.adapter).resolve()
     arms = [a.strip() for a in args.arms.split(",")] if args.arms else [args.arm]
     arms_dir = Path(args.arms_dir).resolve() if args.arms_dir else None
+
+    # A previous run's leaked children look exactly like load: the GPU is
+    # busy, trials are slow, and the results record none of it. Every
+    # number this run produces would be contaminated by contention it
+    # cannot see, so refuse rather than measure.
+    left = strays()
+    if left and not args.allow_strays:
+        lines = "\n".join(f"    {pid}  {d}" for pid, d in left[:8])
+        sys.exit(
+            f"refusing to start: {len(left)} harness process(es) are running "
+            f"that no adapter owns:\n{lines}\n\n"
+            f"These are almost always orphans from a timed-out or killed "
+            f"run. They hold the GPU, so every duration and every timeout "
+            f"measured now would reflect contention this run did not cause "
+            f"and does not record.\n\n"
+            f"    kill {' '.join(str(p) for p, _ in left)}\n\n"
+            f"Then re-run. Pass --allow-strays to measure anyway.")
     n_schema_bad = 0
     # scenario-major, then arm, then trial: an interrupted run still has
     # every arm for the scenarios it finished, so a partial grid is
@@ -486,7 +814,7 @@ def main():
         scen_dir, arm, trial = item
         r, errs = run_one(scen_dir, adapter, args.model, args.keep_sandbox,
                           arm, trial, args.floor, arms_dir, args.jobs > 1,
-                          args.timeout, args.purpose)
+                          args.timeout, args.purpose, args.idle_timeout)
         if args.jobs > 1:
             # Latency is not recoverable after the fact, so say so in the
             # record rather than letting a contended number be compared
@@ -520,7 +848,23 @@ def main():
               "attribution is unavailable and trial marks are skipped. Run "
               "the H4 calibration serially.", file=sys.stderr)
 
+    install_reapers()
     with open(args.out, "a") as out:
+        # One writer per results file. Two runners appending to the same
+        # file interleave silently into something that looks like one
+        # coherent run -- two models, two arms sets, two grids, pooled by
+        # accident and indistinguishable afterwards. flock is advisory and
+        # released with the fd, so a crashed runner does not wedge it.
+        if os.name == "posix":
+            import fcntl
+            try:
+                fcntl.flock(out.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                sys.exit(
+                    f"refusing to start: another runner is already writing "
+                    f"{args.out}. Two runners appending to one file "
+                    f"interleave into a single file that reads as one run "
+                    f"and is not. Use --out with a different path.")
         if args.jobs > 1:
             # Threads, not processes: every trial is dominated by waiting
             # on a subprocess and on the endpoint, so the GIL is not the
