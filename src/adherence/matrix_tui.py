@@ -64,7 +64,10 @@ class SuiteTui(TuiApp):
         self.stamp = 0.0
         self.seen_mtime = 0.0
         self.sel = {f: set() for f in sd.FACETS}
-        self.picking = not pattern
+        # The picker narrows an existing dataset. With nothing loaded yet --
+        # a run that just started -- it is an empty box over the one thing
+        # worth seeing, which is the progress bar.
+        self.picking = not pattern and bool(self.cells)
         self.pick_i = 0
         self.reload()
         self.curses.halfdelay(20)     # 2s tick, so a running battery shows up
@@ -518,9 +521,13 @@ def main():
     if missing:
         print(f"no such results file: {', '.join(missing)}", file=sys.stderr)
         return 1
-    if not sd.load_rows(files or None):
+    # An explicitly named file that exists but is empty is the normal state
+    # of a run that just started, and watching it fill is the whole reason
+    # to point the viewer at one. Only the unscoped case -- nothing named,
+    # nothing on disk -- is a "you have not run anything yet" error.
+    if not files and not sd.load_rows():
         print("no results found — run the suite first "
-              "(make all), or pass a results file glob", file=sys.stderr)
+              "(make all), or pass FILES=<results.jsonl>", file=sys.stderr)
         return 1
     curses_main(lambda scr: SuiteTui(scr, pattern, ref, proxy, files, expect))
     return 0

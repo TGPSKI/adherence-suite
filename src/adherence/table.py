@@ -47,9 +47,17 @@ def main():
 
     cells = sd.load_cells(paths=files, pattern=pattern)
     if not cells:
-        print("no results match" if pattern else
-              "no results found — run the suite first (make all)")
-        return 1
+        if pattern:
+            print("no results match")
+        elif files:
+            # Named a file that exists and holds nothing yet: a run that has
+            # started but not finished its first trial. Not an error, and
+            # not a reason to tell someone to go run the suite.
+            print(f"no rows yet in {', '.join(os.path.basename(f) for f in files)}"
+                  f" — the run has not written its first result")
+        else:
+            print("no results found — run the suite first (make all)")
+        return 0 if files else 1
 
     print(f"{B}cells{X}  {DIM}(trials aggregated per arm/scenario){X}")
     print(f"{DIM}{'arm/scenario':<20}{'trials':>7}{'pass@1':>8}{'tok_in':>10}"
