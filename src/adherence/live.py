@@ -245,7 +245,7 @@ def _subagents(out_dir: Path, root_session: str) -> dict:
             "calls": calls, "tok_in": tok_in, "tok_out": tok_out}
 
 
-def activity(out_dir: Path, limit: int = 60) -> list[dict]:
+def activity(out_dir: Path, limit: int = 400) -> list[dict]:
     """The trial's recent events, with tool output.
 
     The NDJSON stream carries a tool call's *input* and status but not
@@ -288,7 +288,7 @@ def activity(out_dir: Path, limit: int = 60) -> list[dict]:
                 "name": d.get("tool") or "?",
                 "target": _target(inp),
                 "status": st.get("status") or "",
-                "text": " ".join(str(body).split())[:400],
+                "text": " ".join(str(body).split())[:8000],
                 "failed": bool(st.get("error")),
             })
         elif kind == "text":
@@ -296,9 +296,16 @@ def activity(out_dir: Path, limit: int = 60) -> list[dict]:
             if body:
                 out.append({"ts": ts, "who": who, "kind": "text",
                             "name": "", "target": "", "status": "",
-                            "text": body[:400], "failed": False})
+                            "text": body[:8000], "failed": False})
     out.sort(key=lambda e: e["ts"])
-    return out[-limit:]
+    out = out[-limit:]
+    # Absolute position in the run, counted from the start. A reader
+    # scanning a newest-first list needs a number that means something
+    # other than "how far down the screen you are" -- this one says how
+    # many events the trial has produced and where this sits among them.
+    for i, e in enumerate(out, 1):
+        e["n"] = i
+    return out
 
 
 def _scenario_info(scenario: str, root: Path) -> dict:

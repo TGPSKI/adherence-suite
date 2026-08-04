@@ -66,6 +66,9 @@ class SuiteTui(TuiApp):
         self.live = []
         self.live_cursor = 0
         self.live_sel = ""   # out_dir the cursor is anchored to
+        self.act_cursor = 0  # selected activity event, newest-first index
+        self.act_scroll = 0
+        self.act_open = False
         self.proxy_rows = []
         self.stamp = 0.0
         self.seen_mtime = 0.0
@@ -119,6 +122,27 @@ class SuiteTui(TuiApp):
         if not self.live_sel and self.live:
             self.live_sel = self.live[min(self.live_cursor,
                                           len(self.live) - 1)]["out_dir"]
+
+    def scrollbar(self, y0, rows, x, total, offset):
+        """A track with a proportional thumb, drawn down column `x`.
+
+        Rendered whenever the list is longer than the window, so it is
+        possible to tell 'there is nothing more' from 'you are at the top
+        of a long list' -- which a plain truncated list cannot say."""
+        C = self.curses
+        if rows <= 0:
+            return
+        if total <= rows:
+            for i in range(rows):
+                self._put(y0 + i, x, "│", C.A_DIM)
+            return
+        size = max(1, int(rows * rows / total))
+        span = rows - size
+        pos = int(span * offset / max(1, total - rows)) if span else 0
+        for i in range(rows):
+            inside = pos <= i < pos + size
+            self._put(y0 + i, x, "█" if inside else "│",
+                      0 if inside else C.A_DIM)
 
     def _anchor_live(self):
         """Pin the selection to a run, not to a row number."""
@@ -510,37 +534,86 @@ class SuiteTui(TuiApp):
                          f"while the stream is being written", C.A_DIM)
         y += 1
 
-        # ---- live activity, with what the tools actually returned -------
-        # The NDJSON stream carries a call's input and status but not its
-        # output, so a feed built on the stream alone can say "it ran go
-        # test" and never what go test said. This comes from opencode's
-        # store, which keeps both.
+        y += 1
+
+        # ---- activity ---------------------------------------------------
+        # Newest first, indexed by position in the run, and deliberately
+        # one line each: showing every tool's output inline turned the pane
+        # into a wall nobody could scan. [space] opens the selected one.
         room = max_y - y - 2
-        if room > 3:
-            self._put(y, 1, "activity — newest last", C.A_BOLD)
+        if room < 4:
+            return
+        try:
+            ev = lv.activity(Path(r["out_dir"]))
+        except Exception:
+            ev = []
+        ev = ev[::-1]                     # newest first
+        self.act_cursor = max(0, min(self.act_cursor, max(0, len(ev) - 1)))
+
+        if not ev:
+            self._put(y, 1, "activity", C.A_BOLD)
+            self._put(y + 1, 3, "nothing recorded yet", C.A_DIM)
+            return
+
+        sel = ev[self.act_cursor]
+        if self.act_open:
+            # Expanded: the selected event takes the whole remaining pane.
+            head = (f"#{sel['n']}  {sel['name']} {sel['target']}"
+                    if sel["kind"] == "tool" else f"#{sel['n']}  message")
+            self._put(y, 1, head[:max_x - 2],
+                      C.color_pair(4) if sel["failed"] else C.A_BOLD)
+            hint = f"{sel['who']}  {sel['status']}  [space] closes"
+            self._put(y, max(0, max_x - len(hint) - 3), hint, C.A_DIM)
             y += 1
-            try:
-                ev = lv.activity(Path(r["out_dir"]), limit=room)
-            except Exception:
-                ev = []
-            if not ev:
-                self._put(y, 3, "no activity recorded yet", C.A_DIM)
-            for e in ev[-room:]:
-                if y >= max_y - 1:
-                    break
-                tag = "sub" if e["who"] == "subagent" else "   "
-                self._put(y, 1, f"{tag:>4}", C.color_pair(3)
-                          if e["who"] == "subagent" else C.A_DIM)
-                if e["kind"] == "tool":
-                    head = f"{e['name']} {e['target']}"[:44]
-                    self._put(y, 6, f"{head:<44}",
-                              C.color_pair(4) if e["failed"] else 0)
-                    self._put(y, 51, e["text"][:max(0, max_x - 53)],
-                              C.color_pair(4) if e["failed"] else C.A_DIM)
-                else:
-                    self._put(y, 6, "say", C.A_DIM)
-                    self._put(y, 51, e["text"][:max(0, max_x - 53)], C.A_DIM)
-                y += 1
+            body_lines = []
+            width = max_x - 6
+            for para in sel["text"].split("\n"):
+                cur = ""
+                for word in para.split():
+                    if len(cur) + len(word) + 1 > width:
+                        body_lines.append(cur)
+                        cur = word
+                    else:
+                        cur = f"{cur} {word}".strip()
+                body_lines.append(cur)
+            rows = max_y - y - 2
+            self.act_scroll = max(0, min(self.act_scroll,
+                                         max(0, len(body_lines) - rows)))
+            window = body_lines[self.act_scroll:self.act_scroll + rows]
+            for i, ln in enumerate(window):
+                self._put(y + i, 3, ln[:width],
+                          C.color_pair(4) if sel["failed"] else 0)
+            self.scrollbar(y, rows, max_x - 2, len(body_lines),
+                           self.act_scroll)
+            return
+
+        self._put(y, 1, f"activity — newest first, {len(ev)} events",
+                  C.A_BOLD)
+        hint = "[j/k] move  [space] open  [q] back"
+        self._put(y, max(0, max_x - len(hint) - 3), hint, C.A_DIM)
+        y += 1
+        rows = max_y - y - 2
+        # Keep the cursor inside the window without yanking the view.
+        if self.act_cursor < self.act_scroll:
+            self.act_scroll = self.act_cursor
+        elif self.act_cursor >= self.act_scroll + rows:
+            self.act_scroll = self.act_cursor - rows + 1
+        self.act_scroll = max(0, min(self.act_scroll, max(0, len(ev) - rows)))
+        for i, e in enumerate(ev[self.act_scroll:self.act_scroll + rows]):
+            idx = self.act_scroll + i
+            base = C.color_pair(5) if idx == self.act_cursor else 0
+            self._put(y + i, 1, f"{e['n']:>5}", C.A_DIM)
+            self._put(y + i, 7, "sub" if e["who"] == "subagent" else "   ",
+                      C.color_pair(3) if e["who"] == "subagent" else C.A_DIM)
+            if e["kind"] == "tool":
+                label = f"{e['name']} {e['target']}"
+                mark = "!" if e["failed"] else " "
+                self._put(y + i, 11, f"{mark}{label}"[:max_x - 15],
+                          C.color_pair(4) if e["failed"] else base)
+            else:
+                self._put(y + i, 11, f" say  {e['text'][:max_x - 20]}",
+                          C.A_DIM if idx != self.act_cursor else base)
+        self.scrollbar(y, rows, max_x - 2, len(ev), self.act_scroll)
 
     def view_cells(self, cs, body, max_x):
         C = self.curses
@@ -868,6 +941,42 @@ class SuiteTui(TuiApp):
                 self.detail = False
                 return False
             return True
+        # The live view nests: run list -> run detail with an activity
+        # list -> one expanded event. Each level consumes its own keys so
+        # [q] backs out one step instead of quitting from three levels deep.
+        if VIEWS[self.view] == "live" and self.detail:
+            if self.act_open:
+                if key in (ord(" "), 10, 13, ord("q"), ord("Q"), 27):
+                    self.act_open = False
+                    self.act_scroll = 0
+                elif key in (ord("j"), C.KEY_DOWN):
+                    self.act_scroll += 1
+                elif key in (ord("k"), C.KEY_UP):
+                    self.act_scroll = max(0, self.act_scroll - 1)
+                elif key == C.KEY_NPAGE:
+                    self.act_scroll += 15
+                elif key == C.KEY_PPAGE:
+                    self.act_scroll = max(0, self.act_scroll - 15)
+                return False
+            if key in (ord("j"), C.KEY_DOWN):
+                self.act_cursor += 1
+                return False
+            if key in (ord("k"), C.KEY_UP):
+                self.act_cursor = max(0, self.act_cursor - 1)
+                return False
+            if key == C.KEY_NPAGE:
+                self.act_cursor += 15
+                return False
+            if key == C.KEY_PPAGE:
+                self.act_cursor = max(0, self.act_cursor - 15)
+                return False
+            if key in (ord(" "), 10, 13):
+                self.act_open, self.act_scroll = True, 0
+                return False
+            if key in (ord("q"), ord("Q"), 27):
+                self.detail = False
+                self.act_cursor = self.act_scroll = 0
+                return False
         if key == 9:                                  # tab
             self.view = (self.view + 1) % len(VIEWS)
             self.scroll = 0
@@ -889,6 +998,11 @@ class SuiteTui(TuiApp):
             self.scroll = 0
         elif key == ord(" "):
             self.detail = not self.detail
+            if self.detail:
+                # Open on the newest event; that is what "what is it doing"
+                # means for a run still in flight.
+                self.act_cursor = self.act_scroll = 0
+                self.act_open = False
         elif key in (ord("j"), C.KEY_DOWN):
             if VIEWS[self.view] == "live":
                 self.live_cursor += 1
