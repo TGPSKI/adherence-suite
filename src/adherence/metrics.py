@@ -183,7 +183,8 @@ def tool_calls(transcript) -> int:
                                     schema.TASK, schema.PROBE))
 
 
-def abandoned(transcript, expects_edit: bool = True) -> bool:
+def abandoned(transcript, expects_edit: bool = True,
+              completed: bool = True) -> bool:
     """Design §5 control 3: flag trials that terminate with fewer than 2
     tool calls, or with no edit where an edit was the job. An arm whose
     token advantage comes from giving up sooner has to be caught here,
@@ -193,7 +194,16 @@ def abandoned(transcript, expects_edit: bool = True) -> bool:
     answered by a report and nothing else — s04's right answer is to STOP
     and edit nothing at all. Flagging those as abandoned would put a red
     column on compliant behaviour, and a flag that cries wolf is a flag
-    nobody reads by the time the PR-derived tasks arrive."""
+    nobody reads by the time the PR-derived tasks arrive.
+
+    `completed=False` means the harness stopped the trial -- a deadline, a
+    crashed adapter -- and the flag is withheld. Giving up and being cut
+    off look identical in a transcript that ends early, and conflating
+    them puts a give-up flag on the harness's own decision. Observed on a
+    45-minute trial killed at its ceiling with 27 MB of events: recorded
+    as abandoned, which is the opposite of what happened."""
+    if not completed:
+        return False
     if tool_calls(transcript) < 2:
         return True
     if not expects_edit:
@@ -216,7 +226,7 @@ def turns_until_first_compaction(transcript) -> int | None:
 
 
 def compute(transcript, floor: int = 0, duration_s: float | None = None,
-            expects_edit: bool = True) -> dict:
+            expects_edit: bool = True, completed: bool = True) -> dict:
     """All per-run cost metrics.
 
     `floor` is the per-arm harness floor from E5's calibration: the input
@@ -270,7 +280,7 @@ def compute(transcript, floor: int = 0, duration_s: float | None = None,
         "compactions": sum(1 for e in transcript
                            if e.get("type") == schema.COMPACTION),
         "turns_until_first_compaction": turns_until_first_compaction(transcript),
-        "abandoned": abandoned(transcript, expects_edit),
+        "abandoned": abandoned(transcript, expects_edit, completed),
         # §7: total_tokens is the only figure quotable as a saving;
         # per-agent numbers are diagnostics. Both are reported, and the
         # total leads.

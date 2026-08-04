@@ -40,9 +40,19 @@ fi
 # step_finish per inference call, with per-call tokens and cache fields
 # (design §3.1). Verified on opencode 1.18.10. The human-readable format
 # carries none of that.
+# Salvage mode. When a trial is killed at its deadline the harness loses
+# the adapter, and with it the conversion step -- so a run that produced
+# 27 MB of events and worked for 45 minutes was recorded as calls=0,
+# tok=0. The runner re-invokes this script with ADH_SALVAGE=1 to convert
+# whatever the stream captured, without generating anything new.
+if [ "${ADH_SALVAGE:-0}" = "1" ]; then
+  RUN_EXIT=0
+else
 RUN_EXIT=0
 opencode run --format json -m "$MODEL" "${AGENT_ARGS[@]}" "$(cat "$PROMPT_FILE")" \
   > "$OUT/stdout.txt" 2> "$OUT/stderr.txt" || RUN_EXIT=$?
+
+fi
 
 if [ "$RUN_EXIT" -ne 0 ]; then
   echo "opencode-adapter: opencode run exited $RUN_EXIT" >&2

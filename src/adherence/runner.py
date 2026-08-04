@@ -317,6 +317,45 @@ def per_trial_bench_config(out_dir: Path, run_id: str) -> Path | None:
     return dest
 
 
+def salvage(adapter: Path, sandbox: Path, model: str, prompt_file: Path,
+            out_dir: Path, target_agent: str, env: dict) -> int:
+    """Convert a killed trial's event stream into a transcript.
+
+    The adapter writes its transcript at the end, so killing it at a
+    deadline discards everything: a trial that ran 45 minutes and left
+    27,623,328 bytes of events on disk was recorded as `calls=0, tok=0`.
+    For a cost experiment that is not a missing row, it is a measurement
+    thrown away.
+
+    The trial stays `ungradeable` either way -- the harness did not let it
+    finish, so it is not a model result and exclusion criterion 1 still
+    drops it. What salvage buys is the ability to say what an arm was
+    spending when the ceiling stopped it, which is exactly the question a
+    ceiling makes urgent.
+
+    Returns the number of transcript events recovered."""
+    stream = out_dir / "stdout.txt"
+    if not stream.is_file() or stream.stat().st_size == 0:
+        return 0
+    if (out_dir / "transcript.jsonl").is_file():
+        return 0                        # the adapter got there first
+    salvage_env = dict(env)
+    salvage_env["ADH_SALVAGE"] = "1"
+    try:
+        subprocess.run(
+            [str(adapter), str(sandbox), model, str(prompt_file),
+             str(out_dir), target_agent],
+            capture_output=True, text=True, timeout=300, env=salvage_env,
+            **({"start_new_session": True} if os.name == "posix" else {}))
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    try:
+        return sum(1 for line in (out_dir / "transcript.jsonl").read_text()
+                   .splitlines() if line.strip())
+    except OSError:
+        return 0
+
+
 def wait_or_kill(proc, out_dir: Path, hard_s: int, idle_s: int):
     """Wait for the adapter, killing it only for a reason worth killing for.
 
@@ -353,20 +392,24 @@ def wait_or_kill(proc, out_dir: Path, hard_s: int, idle_s: int):
     # checkpoints, so summing it alone made a busy subagent look idle.
     wal = Path(str(store) + "-wal")
     t0 = time.time()
-    last_size, last_change = -1, t0
+    last_size, last_change, real_bytes = -1, t0, 0
 
-    def _activity_size():
+    def _activity():
+        """(fingerprint, bytes). The fingerprint only has to CHANGE when
+        work happens; the byte count is what a human reads, so they are
+        kept apart -- printing the fingerprint as a byte count produced
+        '1,785,879,733 bytes' for a 27 MB stream."""
         import contextlib
-        total = 0
+        fp = 0
+        size = 0
         for f in (stream, store, wal):
-            # A file that is not there yet contributes nothing; the sum
-            # only has to move, not be meaningful on its own.
             with contextlib.suppress(OSError):
                 st = f.stat()
-                # size AND mtime: a WAL that is being overwritten in place
-                # can stay the same size while still carrying new writes.
-                total += st.st_size + int(st.st_mtime)
-        return total
+                # size AND mtime: a WAL overwritten in place can hold its
+                # size while still taking writes.
+                fp += st.st_size + int(st.st_mtime)
+                size += st.st_size
+        return fp, size
 
     while True:
         try:
@@ -374,7 +417,7 @@ def wait_or_kill(proc, out_dir: Path, hard_s: int, idle_s: int):
         except subprocess.TimeoutExpired:
             pass
         now = time.time()
-        size = _activity_size()
+        size, real_bytes = _activity()
         if size != last_size:
             last_size, last_change = size, now
 
@@ -384,10 +427,10 @@ def wait_or_kill(proc, out_dir: Path, hard_s: int, idle_s: int):
         if idle_s and idle > idle_s and last_size >= 0:
             why = (f"adapter idle {int(idle)}s (no event-stream and no "
                    f"session-store activity; limit {idle_s}s) after "
-                   f"{int(elapsed)}s and {last_size:,} bytes")
+                   f"{int(elapsed)}s and {real_bytes:,} bytes")
         elif hard_s and elapsed > hard_s:
             why = (f"adapter hit the hard ceiling of {hard_s}s while still "
-                   f"active ({last_size:,} bytes of events, last advanced "
+                   f"active ({real_bytes:,} bytes of events, last advanced "
                    f"{int(idle)}s ago)")
         if not why:
             continue
@@ -726,6 +769,15 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
         _LIVE_PROCS.discard(proc)
     adapter_ok = why is None and proc.returncode == 0
     adapter_err = why or (err or "")[-2000:]
+    if not adapter_ok:
+        # A killed trial still did its work; the harness just took away the
+        # step that writes it down. Re-invoke the adapter in salvage mode to
+        # convert whatever the stream captured. Best-effort and bounded --
+        # the run is already over and nothing downstream may block on it.
+        saved = salvage(adapter, sandbox, model, prompt_file, out_dir,
+                        target_agent, env)
+        if saved:
+            adapter_err += f"; salvaged {saved} transcript event(s)"
     duration = time.time() - t0
 
     transcript = gradelib.load_transcript(out_dir / "transcript.jsonl")
@@ -778,7 +830,10 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
         metrics=metrics.compute(transcript, floor=floor,
                                 duration_s=round(duration, 1),
                                 expects_edit=bool(int(
-                                    meta.get("expects_edit", 1)))),
+                                    meta.get("expects_edit", 1))),
+                                # A trial the harness stopped cannot be
+                                # said to have given up.
+                                completed=adapter_ok),
         provenance=provenance(scen_dir, meta, arm, arms_dir, adapter, harness),
         fixture=str(meta.get("fixture", "")),
         purpose=purpose,
