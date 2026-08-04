@@ -246,7 +246,7 @@ def load_grader(scen_dir: Path):
 def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
             arm: str = "-", trial: int = 0, floor: int = 0,
             arms_dir: Path | None = None, parallel: bool = False,
-            timeout_override: int = 0) -> dict:
+            timeout_override: int = 0, purpose: str = "validation") -> dict:
     meta = load_yamlish(scen_dir / "scenario.yaml")
     sandbox = Path(tempfile.mkdtemp(prefix=f"adh-{scen_dir.name}-"))
     out_dir = Path(tempfile.mkdtemp(prefix=f"adh-out-{scen_dir.name}-"))
@@ -354,6 +354,7 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
                                     meta.get("expects_edit", 1)))),
         provenance=provenance(scen_dir, meta, arm, arms_dir, adapter, harness),
         fixture=str(meta.get("fixture", "")),
+        purpose=purpose,
     )
     if not keep:
         shutil.rmtree(sandbox, ignore_errors=True)
@@ -386,6 +387,12 @@ def main():
                          "a function of GPU scheduling and is NOT comparable "
                          "across arms (§16.4) — it is recorded but stamped "
                          "contended=true")
+    ap.add_argument("--purpose", default="validation",
+                    choices=("validation", "experiment"),
+                    help="'validation' shakes out the method and the code; "
+                         "'experiment' is the registered grid. Defaults to "
+                         "validation so nothing is labelled experiment data "
+                         "by omission")
     ap.add_argument("--timeout", type=int, default=0,
                     help="override every scenario's timeout, in seconds. The "
                          "feasibility probe wants a tighter bound than the "
@@ -419,7 +426,7 @@ def main():
         scen_dir, arm, trial = item
         r, errs = run_one(scen_dir, adapter, args.model, args.keep_sandbox,
                           arm, trial, args.floor, arms_dir, args.jobs > 1,
-                          args.timeout)
+                          args.timeout, args.purpose)
         if args.jobs > 1:
             # Latency is not recoverable after the fact, so say so in the
             # record rather than letting a contended number be compared

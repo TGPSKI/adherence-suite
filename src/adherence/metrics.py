@@ -244,6 +244,13 @@ def compute(transcript, floor: int = 0, duration_s: float | None = None,
                  for a in agents}
 
     m = {
+        # Call 1's input is system prompt + tool schemas + the arm's
+        # instruction surface + the task prompt. The task prompt is
+        # identical across arms for a given scenario, so the difference
+        # between arms here IS the arm surface -- the per-arm floor (E5),
+        # measured under real conditions instead of from a separate no-op
+        # run that would not carry the same tool schemas.
+        "first_call_input": (cs[0].get("input_tokens", 0) if cs else 0),
         "calls": len(cs),
         "tok_in_billed": tok_in,
         "tok_in_marginal": tok_in - floor * len(cs),

@@ -83,6 +83,12 @@ _RESULT_REQUIRED = {
 }
 _RESULT_OPTIONAL = {
     "sandbox": str, "out_dir": str,
+    # "validation" (shaking out the method, the code and the harness) or
+    # "experiment" (the registered grid). Dry runs and real runs live in
+    # the same directory, look identical, and pool silently -- so the
+    # distinction has to be ON the record, not in someone's memory of
+    # which file was which.
+    "purpose": str,
     # derived cost metrics, computed by metrics.py from call events
     "metrics": dict,
     # Enough to re-run this exact trial without trusting whoever produced
@@ -178,7 +184,7 @@ def result(scenario: str, category: str, model: str, adapter: str, arm: str,
            completion_tokens: int, checks: list, all_pass: bool,
            sandbox: str = "", out_dir: str = "",
            metrics: dict | None = None, provenance: dict | None = None,
-           fixture: str = "") -> dict:
+           fixture: str = "", purpose: str = "validation") -> dict:
     r = {
         "scenario": scenario, "category": category, "model": model,
         "adapter": adapter, "arm": arm, "trial": int(trial),
@@ -193,6 +199,7 @@ def result(scenario: str, category: str, model: str, adapter: str, arm: str,
         r["provenance"] = provenance
     if fixture:
         r["fixture"] = fixture
+    r["purpose"] = purpose
     return r
 
 

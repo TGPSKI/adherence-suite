@@ -160,6 +160,19 @@ def pass_rate(rows, arm):
     return sum(1.0 for r in rs if r["all_pass"]) / len(rs) if rs else float("nan")
 
 
+def experiment_rows(rows) -> tuple[list[dict], int]:
+    """Only rows produced by the registered grid.
+
+    Validation runs exist to shake out the method, the code and the
+    harness. They are the same shape as real results, land in the same
+    directory, and would pool into a verdict without anyone deciding to.
+    Rows with no `purpose` predate the field and are treated as validation:
+    the safe reading of an unlabelled row is not "this is experiment data".
+    """
+    keep = [r for r in rows if r.get("purpose") == "experiment"]
+    return keep, len(rows) - len(keep)
+
+
 def evaluate(rows) -> dict:
     """Every falsifier, with an explicit NOT TESTABLE where a precondition
     is missing. A verdict of 'not tripped' from a test that never ran is
@@ -325,6 +338,14 @@ def main():
     rows = load(args.results)
     if not rows:
         print("no results", file=sys.stderr)
+        return 1
+    rows, dropped = experiment_rows(rows)
+    if dropped:
+        print(f"excluded {dropped} row(s) not marked purpose=experiment "
+              f"(validation runs, or predating the field)", file=sys.stderr)
+    if not rows:
+        print("no rows marked purpose=experiment. These are validation runs; "
+              "the registered analysis does not read them.", file=sys.stderr)
         return 1
     F = evaluate(rows)
     print(json.dumps(F, indent=2) if args.json else render(F))

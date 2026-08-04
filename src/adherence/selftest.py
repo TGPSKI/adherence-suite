@@ -209,6 +209,7 @@ FLOOR = 9_500
 
 COST_EXPECTED = {
     "calls": 5,                                  # 2 root + 3 verify
+    "first_call_input": 10_000,                  # call 0 of the root agent
     "tok_in_billed": 32_200,                     # 10000+12000+3000+3500+3700
     "tok_in_marginal": 32_200 - FLOOR * 5,       # = -15300, floor > small calls
     # uncached = 32200-4000-1000 = 27200; +1.25*1000 +0.10*4000 = 28850.0
@@ -464,6 +465,28 @@ def _synth(arm, scen, trial, tok, calls, passed, floor=9500):
                         "cache_read": 0, "cache_write": 0}}
 
 
+def check_purpose_isolation() -> list[str]:
+    """A validation run must never reach a registered verdict.
+
+    Dry runs and real runs are the same shape and share a directory. The
+    only thing keeping a method shakedown out of the published analysis is
+    this filter, so it is worth a test of its own."""
+    problems = []
+    rows = [{"scenario": "s1", "arm": "a3", "all_pass": True, "trial": 0,
+             "model": "m", "adapter": "a", "checks": [], "metrics": {},
+             "purpose": p}
+            for p in ("validation", "experiment", "experiment")]
+    keep, dropped = analyze.experiment_rows(rows)
+    if len(keep) != 2 or dropped != 1:
+        problems.append(f"experiment_rows kept {len(keep)} dropped {dropped}; "
+                        f"expected 2 and 1")
+    unlabelled = [{k: v for k, v in rows[0].items() if k != "purpose"}]
+    if analyze.experiment_rows(unlabelled)[0]:
+        problems.append("an unlabelled row was treated as experiment data; "
+                        "the safe reading of no label is 'not experiment'")
+    return problems
+
+
 def check_analysis() -> list[str]:
     """The pre-specified analysis (docs/EVAL.md) must detect a planted
     effect, stay silent when there is none, and REFUSE when a precondition
@@ -568,6 +591,14 @@ def check_analysis() -> list[str]:
 
 def main():
     failures = 0
+    purpose_problems = check_purpose_isolation()
+    print("OK  validation/experiment isolation" if not purpose_problems
+          else "BAD validation/experiment isolation")
+    for p in purpose_problems:
+        print(f"      {p}")
+    if purpose_problems:
+        failures += 1
+
     analysis_problems = check_analysis()
     print("OK  pre-specified analysis" if not analysis_problems
           else "BAD pre-specified analysis")
@@ -615,7 +646,7 @@ def main():
                     print(f"      compliant tripped: {c.name}: {c.evidence}")
         if f:
             print(f"      violator evaded: {[c.name for c in fc]}")
-    n = len(ACTORS) + 4   # scenarios + cost metrics + noise filter
+    n = len(ACTORS) + 5   # scenarios + cost metrics + noise filter
                           # + test runner + pre-specified analysis
     print(f"\nselftest: {n-failures}/{n} checks healthy")
     sys.exit(1 if failures else 0)
