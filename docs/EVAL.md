@@ -546,6 +546,96 @@ dropped with the reason logged.
 This was underspecified in v1. Pinning it now, before data, is the point of
 saying so here rather than deciding it when the first results look wrong.
 
+## Amendment 2 — grading a feature PR without handing over its shape
+
+Recorded 2026-08-04, against the frozen v1 tag, **after the validation grid
+and before any experiment data**. It changes how a subset of tasks is graded.
+No registered claim, threshold, arm, or analysis procedure changes.
+
+### What the validation grid found
+
+Amendment 1 registered SWE-bench-style grading: the agent works from the PR's
+parent, never sees the tests, and afterwards the harness applies the PR's own
+`_test.go` files and runs the affected packages.
+
+That protocol is sound for a **bug fix**, whose tests call API that already
+exists. It is not sound for a **feature PR**, whose tests call API the PR is
+adding. Measured on the 210-run validation grid:
+
+| failure mode | scenarios | pass rates | in the [0.25, 0.80] band |
+|---|---|---|---|
+| tests name a symbol the fix introduces | 4 | 0%, 5%, 0%, 0% | **0 / 4** |
+| tests compile; assertions disagree | 6 | 5%, 19%, 71%, 76%, 90%, 95% | 2 / 6 |
+
+A perfect separation, and the dominant cause of the floor risk this document
+names as its biggest schedule risk. On `cli-cli-13057` the failure was
+`unknown field IssueType in struct literal of type CreateOptions` — a
+**compile error in the test file** — on a trial that had already passed
+`diff_coverage` with 13/13 pre-edit probes inside the real diff's
+directories. The agent located the work, implemented it, and failed because
+it did not independently choose the maintainers' internal field name.
+
+That is not model capability and it is not a grader bug. It is a protocol
+that asks a question the agent was never given the means to answer.
+
+### The repair that was rejected, and why
+
+The obvious fix is to state the required API surface in the prompt. **It was
+rejected**, and the reason is recorded here because it is the more tempting
+option:
+
+A symbol list *is* routing information. `CreateOptions.IssueType` names its
+subsystem; `skillSearchFunc` names its module. Supplying it hands every arm a
+piece of exactly what the treatment under test is supposed to supply — inside
+the treatment's own channel. It would bias the primary outcome toward the
+null and make a null result uninterpretable, because "the pattern did not
+help" and "the control was given the answer" would be the same measurement.
+
+Grading at the public interface was preferred but has **no supply here**: of
+34 tasks, 30 are unit-test-only and none are acceptance-test-only.
+
+### What is registered instead
+
+Tasks whose tests cannot compile against a differently-named implementation
+are graded at the **command-line boundary**, against the PR's own binary:
+
+    reference = build(merge commit)     what the PR actually shipped
+    candidate = build(the agent's tree) what the agent produced
+    compare flag-for-flag at the CLI
+
+`gh issue create --type` is a user-facing contract. It already appears in the
+PR body the agent receives, so **nothing is added to the prompt** — the
+grader stops demanding an identifier it never disclosed. The oracle is the
+merge commit's own compiled binary, so the expectations remain the
+maintainers' and not the experimenter's, and the command path is derived
+mechanically from the PR's file paths rather than chosen.
+
+**Assignment is by compiler, not by judgement.** `adherence.classify` checks
+the PR's tests out onto the parent tree and builds them. A build error naming
+an undefined identifier routes the task to the CLI grader; anything else
+stays with the unit grader. The choice and the identifiers that forced it are
+written into each task record. A declaration-scan heuristic was tried first
+and rejected for false negatives: it missed `13675`
+(`field.onSearchDone.Store undefined` — a field on an existing struct) and
+`13624`, neither of which adds a top-level declaration.
+
+### Limits, and how results are reported
+
+`cli.surface` verifies that the flags the PR shipped are present and
+accepted. It does **not** verify they behave correctly, so it is a weaker
+signal than a passing unit test.
+
+Therefore: **unit-graded tasks are the primary evidence and CLI-graded tasks
+are reported as a separate tier.** The two are never pooled into one pass
+rate. A cost comparison conditioned on success uses the unit-graded set
+unless a result is stated explicitly as spanning both.
+
+Verified before registration on a real trial from the validation run — one
+that scored `pr.task_pass = fail` purely for naming a struct field
+differently: `cli.builds` pass, `cli.surface` pass (all 17 flags the PR's own
+binary advertises), `cli.extra_surface` pass.
+
+
 ## Known gaps
 
 - **E5 is not testable locally.** vLLM returns `prompt_tokens_details: null`, so

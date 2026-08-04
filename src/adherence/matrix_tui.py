@@ -41,7 +41,10 @@ VIEW_HELP = {
     "calib": "adapter vs proxy per run; >2% fails the H4 gate (§3.2)",
 }
 SORTS = ("tag", "pass", "tok")
-SECTIONS = ("running", "graded", "summary")
+SECTIONS = ("running", "summary", "graded")
+# Per-section sorts, cycled with [s] on whichever section has focus.
+GRADED_SORTS = ("recent", "verdict", "tok", "dur")
+SUM_SORTS = ("tag", "pass", "tok", "dur", "left")
 GATE = 0.02          # H4 tolerance
 
 
@@ -79,6 +82,19 @@ class SuiteTui(TuiApp):
         self.live_section = 0            # 0 running, 1 graded, 2 summary
         self.graded_cursor = 0
         self.sum_cursor = 0
+        # Each section scrolls independently. They used to be truncated to
+        # whatever fit, with no scroll and no indication -- so 25 graded
+        # rows showed 6 and the cursor could sit on one of the 19 nobody
+        # could see.
+        self.graded_scroll = 0
+        self.sum_scroll = 0
+        self.graded_sort = 0
+        self.sum_sort = 0
+        # Direction is separate from key, so [S] flips without losing the
+        # column you picked. Defaults are the useful end: newest graded
+        # first, cheapest cell first.
+        self.graded_desc = True
+        self.sum_desc = False
         self.proxy_rows = []
         self.stamp = 0.0
         self.seen_mtime = 0.0
@@ -153,6 +169,58 @@ class SuiteTui(TuiApp):
             inside = pos <= i < pos + size
             self._put(y0 + i, x, "█" if inside else "│",
                       0 if inside else C.A_DIM)
+
+    def section_lengths(self):
+        """Rows in each live section, in display order."""
+        return [len(self.live), len(self.sum_cells()),
+                len(self.graded_rows())]
+
+    def _move_live(self, step):
+        """Move one row, crossing into the next section at the edges.
+
+        The three tables read as one column on screen, so [j] at the last
+        row of `running` should land on the first row of `graded` rather
+        than stop dead and wait for an [h]/[l] nobody thinks to press.
+        [h]/[l] still jump whole sections."""
+        lens = self.section_lengths()
+        cursors = [self.live_cursor, self.sum_cursor, self.graded_cursor]
+        sec = self.live_section
+        cur = cursors[sec] + step
+        if cur < 0:
+            # off the top: previous non-empty section, at its last row
+            prev = next((i for i in range(sec - 1, -1, -1) if lens[i]), None)
+            if prev is None:
+                cur = 0
+            else:
+                sec, cur = prev, lens[prev] - 1
+        elif cur >= lens[sec]:
+            nxt = next((i for i in range(sec + 1, 3) if lens[i]), None)
+            if nxt is None:
+                cur = max(0, lens[sec] - 1)
+            else:
+                sec, cur = nxt, 0
+        self.live_section = sec
+        cursors[sec] = max(0, cur)
+        self.live_cursor, self.sum_cursor, self.graded_cursor = cursors
+        if sec == 0:
+            self._anchor_live()
+
+    def _move_rows(self, step):
+        """Move the results cursor, clamped to the rows that exist.
+
+        It was unbounded, and `view_cells` clamps `scroll` but not
+        `cursor` -- so holding [j] walked the selection off the end of the
+        list, the highlight vanished, and [space] then opened a detail
+        pane for a row that was never on screen."""
+        n = len(self.visible())
+        if not n:
+            self.cursor = self.scroll = 0
+            return
+        self.cursor = max(0, min(self.cursor + step, n - 1))
+        # Keep the cursor in view without yanking the window around.
+        if self.cursor < self.scroll:
+            self.scroll = self.cursor
+        self.scroll = max(0, min(self.scroll, max(0, n - 1)))
 
     def _anchor_live(self):
         """Pin the selection to a run, not to a row number."""
@@ -240,8 +308,10 @@ class SuiteTui(TuiApp):
             keys = [("[tab] view", C.A_DIM),
                     (f"[h/l] section: {SECTIONS[self.live_section]}",
                      C.color_pair(5)),
-                    ("[j/k] row", C.A_DIM), ("[space] detail", C.A_DIM),
-                    ("[r] reload", C.A_DIM), ("[q] quit", C.A_DIM)]
+                    ("[j/k] row", C.A_DIM), ("[s] sort [S] asc/desc",
+                                             C.A_DIM),
+                    ("[space] detail", C.A_DIM), ("[r] reload", C.A_DIM),
+                    ("[q] quit", C.A_DIM)]
         else:
             keys = [("[tab] view", C.A_DIM),
                     (f"[L] live·{n_live}",
@@ -275,14 +345,14 @@ class SuiteTui(TuiApp):
             # results-side idea (arm/scenario cells), and silently hiding a
             # running job because of it would be the worst possible
             # behaviour for a monitor.
-            if self.detail and self.live_section == 1 and self.rows:
+            if self.detail and self.live_section == 2 and self.rows:
                 rows = self.graded_rows()
                 self.graded_cursor = max(0, min(self.graded_cursor,
                                                 len(rows) - 1))
                 self.view_result_detail(rows[self.graded_cursor],
                                         max_y, max_x)
-            elif self.detail and self.live_section == 2 and self.cells:
-                cs = sd.load_cells(paths=self.files)
+            elif self.detail and self.live_section == 1 and self.cells:
+                cs = self.sum_cells()
                 self.sum_cursor = max(0, min(self.sum_cursor, len(cs) - 1))
                 self.view_detail(cs[self.sum_cursor], max_y, max_x)
             elif self.detail and self.live:
@@ -291,7 +361,7 @@ class SuiteTui(TuiApp):
                 self.view_live_detail(self.live[self.live_cursor],
                                       max_y, max_x)
             else:
-                total, avail = self.view_live(body, max_x)
+                total, avail = self.view_live(body, max_x, max_y)
             self.footer(max_y, max_x, total, avail)
             return
         if not cs and v != "calib":
@@ -320,14 +390,29 @@ class SuiteTui(TuiApp):
 
     STATE_COLOR = {"running": 2, "grading": 5, "stalled": 4, "dead": 4}
 
-    def view_live(self, body, max_x):
+    def view_live(self, body, max_x, max_y=0):
         """Three stacked sections: what is running, what has just been
         graded, and the per-(arm, scenario) rollup that says whether the
         grid is on pace. A single flat table cannot answer 'is it working'
         and 'how long will this take' at the same time."""
         C = self.curses
+        max_y = max_y or (body + 3)
         runs = self.live
         y = 3
+        # Allocate by what each section actually holds, not a fixed split.
+        # Every section costs a title + a column header + a blank, and the
+        # summary line at the top costs two; a section with three rows
+        # should not reserve half the screen while another is cut off.
+        HEAD = 3
+        n_run, n_grad = len(runs), len(self.rows)
+        n_sum = len(self.cells)
+        overhead = 2 + HEAD * (bool(n_run) + bool(n_grad) + bool(n_sum))
+        spare = max(3, body - overhead - min(n_run, 8))
+        # Graded and summary share the remainder in proportion to how many
+        # rows each has, so neither starves the other on a short terminal.
+        want = max(1, n_grad) + max(1, n_sum)
+        self.sec_budget = max(2, min(n_grad or 1,
+                                     int(spare * max(1, n_grad) / want)))
         s = lv.summarize(runs)
         done = len(self.rows)
         self._put(y, 1, f"{s['running']} running · {s['grading']} grading · "
@@ -385,55 +470,14 @@ class SuiteTui(TuiApp):
             y += 1
         y += 1
 
-        # ---- graded ----------------------------------------------------
-        # Newest first: a run in progress is judged by what just landed,
-        # not by what landed an hour ago.
-        recent = sorted(self.rows, key=lambda r: r.get("_seq", 0))[-6:][::-1]
-        if recent:
-            self._put(y, 1, "graded — most recent first"
+        cells = self.sum_cells()
+        # ---- per (arm, scenario) rollup --------------------------------
+        if cells:
+            self._put(y, 1, f"summary — per arm x scenario, sorted by "
+                            f"{SUM_SORTS[self.sum_sort]} "
+                            f"{'v' if self.sum_desc else '^'}"
                             + ("  ◀" if self.live_section == 1 else ""),
                       C.color_pair(5) if self.live_section == 1 else C.A_BOLD)
-            y += 1
-            self._put(y, 1, f"{'scenario':<20}{'arm':>4}{'t':>3}{'verdict':>9}"
-                            f"{'calls':>7}{'tok_in':>12}{'dur':>9}  failing",
-                      C.A_DIM)
-            y += 1
-            self.graded_cursor = max(0, min(self.graded_cursor,
-                                            len(recent) - 1))
-            for gi, r in enumerate(recent):
-                if y >= 3 + body - 6:
-                    break
-                hl = (C.color_pair(5)
-                      if gi == self.graded_cursor and self.live_section == 1
-                      else 0)
-                m = r.get("metrics") or {}
-                ung = [c for c in r["checks"]
-                       if c.get("name") == "adapter"
-                       and c.get("status") != "pass"]
-                verdict = ("ungradeable" if ung else
-                           "pass" if r["all_pass"] else "fail")
-                col = (C.color_pair(3) if ung else
-                       C.color_pair(1) if r["all_pass"] else C.color_pair(4))
-                fails = ", ".join(c["name"] for c in r["checks"]
-                                  if c["status"] == "fail") or "—"
-                self._put(y, 1, f"{r['scenario'][:19]:<20}", hl)
-                self._put(y, 21, f"{r.get('arm', '-'):>4}", C.A_DIM)
-                self._put(y, 25, f"{r['trial']:>3}", C.A_DIM)
-                self._put(y, 28, f"{verdict:>9}", col)
-                self._put(y, 37, f"{m.get('calls', 0):>7}", C.A_DIM)
-                self._put(y, 44, f"{m.get('tok_in_billed', 0):>12,}", C.A_DIM)
-                self._put(y, 56, f"{lv.fmt_age(r.get('duration_s', 0)):>9}",
-                          C.A_DIM)
-                self._put(y, 67, fails[:max(0, max_x - 69)], C.A_DIM)
-                y += 1
-            y += 1
-
-        # ---- per (arm, scenario) rollup --------------------------------
-        cells = sd.load_cells(paths=self.files)
-        if cells:
-            self._put(y, 1, "per arm × scenario — pace and cost so far"
-                            + ("  ◀" if self.live_section == 2 else ""),
-                      C.color_pair(5) if self.live_section == 2 else C.A_BOLD)
             y += 1
             self._put(y, 1, f"{'arm/scenario':<24}{'done':>6}{'ung':>5}"
                             f"{'pass':>6}{'med tok':>11}{'p90 tok':>11}"
@@ -446,11 +490,18 @@ class SuiteTui(TuiApp):
             if self.expect and cells:
                 per_cell = max(1, round(self.expect / max(1, len(cells))))
             self.sum_cursor = max(0, min(self.sum_cursor, len(cells) - 1))
-            for ci, c in enumerate(cells):
-                if y >= 3 + body - 1:
-                    break
+            rows_s = max(1, min(len(cells), max_y - y - 2))
+            if self.sum_cursor < self.sum_scroll:
+                self.sum_scroll = self.sum_cursor
+            elif self.sum_cursor >= self.sum_scroll + rows_s:
+                self.sum_scroll = self.sum_cursor - rows_s + 1
+            self.sum_scroll = max(0, min(self.sum_scroll,
+                                         max(0, len(cells) - rows_s)))
+            for ci_off, c in enumerate(cells[self.sum_scroll:
+                                             self.sum_scroll + rows_s]):
+                ci = self.sum_scroll + ci_off
                 hl = (C.color_pair(5)
-                      if ci == self.sum_cursor and self.live_section == 2
+                      if ci == self.sum_cursor and self.live_section == 1
                       else 0)
                 left = max(0, per_cell - c["trials"]) if per_cell else 0
                 eta = left * c["dur_s"]
@@ -477,6 +528,64 @@ class SuiteTui(TuiApp):
                 self._put(y, 106, f"{lv.fmt_age(eta):>8}" if eta
                           else f"{'—':>8}", C.A_DIM)
                 y += 1
+        # ---- graded ----------------------------------------------------
+        # Newest first: a run in progress is judged by what just landed,
+        # not by what landed an hour ago.
+        recent = self.graded_rows()
+        if recent:
+            self._put(y, 1, f"graded — sorted by "
+                            f"{GRADED_SORTS[self.graded_sort]} "
+                            f"{'v' if self.graded_desc else '^'}"
+                            + ("  ◀" if self.live_section == 2 else ""),
+                      C.color_pair(5) if self.live_section == 2 else C.A_BOLD)
+            y += 1
+            self._put(y, 1, f"{'scenario':<20}{'arm':>4}{'t':>3}{'verdict':>9}"
+                            f"{'calls':>7}{'tok_in':>12}{'dur':>9}  failing",
+                      C.A_DIM)
+            y += 1
+            self.graded_cursor = max(0, min(self.graded_cursor,
+                                            len(recent) - 1))
+            rows_g = max(1, min(len(recent), self.sec_budget))
+            if self.graded_cursor < self.graded_scroll:
+                self.graded_scroll = self.graded_cursor
+            elif self.graded_cursor >= self.graded_scroll + rows_g:
+                self.graded_scroll = self.graded_cursor - rows_g + 1
+            self.graded_scroll = max(0, min(self.graded_scroll,
+                                            max(0, len(recent) - rows_g)))
+            window_g = recent[self.graded_scroll:self.graded_scroll + rows_g]
+            for gi_off, r in enumerate(window_g):
+                gi = self.graded_scroll + gi_off
+                hl = (C.color_pair(5)
+                      if gi == self.graded_cursor and self.live_section == 2
+                      else 0)
+                m = r.get("metrics") or {}
+                ung = [c for c in r["checks"]
+                       if c.get("name") == "adapter"
+                       and c.get("status") != "pass"]
+                verdict = ("ungradeable" if ung else
+                           "pass" if r["all_pass"] else "fail")
+                col = (C.color_pair(3) if ung else
+                       C.color_pair(1) if r["all_pass"] else C.color_pair(4))
+                fails = ", ".join(c["name"] for c in r["checks"]
+                                  if c["status"] == "fail") or "—"
+                self._put(y, 1, f"{r['scenario'][:19]:<20}", hl)
+                self._put(y, 21, f"{r.get('arm', '-'):>4}", C.A_DIM)
+                self._put(y, 25, f"{r['trial']:>3}", C.A_DIM)
+                self._put(y, 28, f"{verdict:>9}", col)
+                self._put(y, 37, f"{m.get('calls', 0):>7}", C.A_DIM)
+                self._put(y, 44, f"{m.get('tok_in_billed', 0):>12,}", C.A_DIM)
+                self._put(y, 56, f"{lv.fmt_age(r.get('duration_s', 0)):>9}",
+                          C.A_DIM)
+                self._put(y, 67, fails[:max(0, max_x - 69)], C.A_DIM)
+                y += 1
+            if len(recent) > rows_g:
+                self._put(y, 1,
+                          f"  {self.graded_scroll + 1}-"
+                          f"{self.graded_scroll + rows_g} of {len(recent)}"
+                          f"   [j/k] scrolls", C.A_DIM)
+                y += 1
+            y += 1
+
         return 0, 0
 
     def view_live_detail(self, r, max_y, max_x):
@@ -677,8 +786,33 @@ class SuiteTui(TuiApp):
             self.act_sel = ev[self.act_cursor]["id"]
 
     def graded_rows(self):
-        """Results newest first, the order the graded table shows."""
-        return sorted(self.rows, key=lambda r: r.get("_seq", 0))[::-1]
+        """Graded results in the order the table shows them."""
+        def verdict_rank(r):
+            ung = any(c.get("name") == "adapter" and c.get("status") != "pass"
+                      for c in r["checks"])
+            return (0 if ung else 1 if r["all_pass"] else 2)
+
+        mode = GRADED_SORTS[self.graded_sort]
+        keys = {
+            "recent": lambda r: r.get("_seq", 0),
+            "verdict": lambda r: (verdict_rank(r), r.get("_seq", 0)),
+            "tok": lambda r: (r.get("metrics") or {}).get("tok_in_billed", 0),
+            "dur": lambda r: r.get("duration_s", 0),
+        }
+        return sorted(self.rows, key=keys[mode], reverse=self.graded_desc)
+
+    def sum_cells(self):
+        """Per-(arm, scenario) cells in the order the table shows them."""
+        cs = sd.load_cells(paths=self.files)
+        mode = SUM_SORTS[self.sum_sort]
+        keys = {
+            "tag": lambda c: c["tag"],
+            "pass": lambda c: (c["pass_rate"], c["tag"]),
+            "tok": lambda c: c["tok"],
+            "dur": lambda c: c["dur_s"],
+            "left": lambda c: c["dur_s"] * c["trials"],
+        }
+        return sorted(cs, key=keys[mode], reverse=self.sum_desc)
 
     def view_result_detail(self, r, max_y, max_x):
         """One graded trial: every check with its evidence.
@@ -795,7 +929,12 @@ class SuiteTui(TuiApp):
                         f"{'probes':>8}{'redun':>7}{'abnd':>6}  failing",
                   C.A_DIM)
         avail = max(1, body - 2)
+        self.cursor = max(0, min(self.cursor, max(0, len(cs) - 1)))
         self.scroll = max(0, min(self.scroll, max(0, len(cs) - avail)))
+        if self.cursor < self.scroll:
+            self.scroll = self.cursor
+        elif self.cursor >= self.scroll + avail:
+            self.scroll = self.cursor - avail + 1
         for i, c in enumerate(cs[self.scroll:self.scroll + avail]):
             y = 4 + i
             idx = self.scroll + i
@@ -1142,13 +1281,7 @@ class SuiteTui(TuiApp):
                 return False
             if key in (ord("j"), C.KEY_DOWN, ord("k"), C.KEY_UP):
                 step = 1 if key in (ord("j"), C.KEY_DOWN) else -1
-                if self.live_section == 0:
-                    self.live_cursor = max(0, self.live_cursor + step)
-                    self._anchor_live()
-                elif self.live_section == 1:
-                    self.graded_cursor = max(0, self.graded_cursor + step)
-                else:
-                    self.sum_cursor = max(0, self.sum_cursor + step)
+                self._move_live(step)
                 return False
             if key in (ord(" "), 10, 13):
                 # Each table opens its own kind of detail: a live run, a
@@ -1161,9 +1294,21 @@ class SuiteTui(TuiApp):
                     self.act_cursor = self.act_scroll = 0
                     self.act_sel, self.act_follow = "", True
                     self.act_open = False
-                elif self.live_section == 1 and self.rows or self.live_section == 2 and self.cells:
+                elif self.live_section == 1 and self.cells or self.live_section == 2 and self.rows:
                     self.detail = True
                 return False
+        # Only the running section has an activity list under it. Letting
+        # this block run for the graded and summary details created a level
+        # with nothing in it: [space] appeared to do nothing and then took
+        # two backs to leave.
+        if (VIEWS[self.view] == "live" and self.detail
+                and self.live_section != 0):
+            if key == ord("Q"):
+                return True
+            if key in (ord(" "), 10, 13, ord("q"), 27, C.KEY_LEFT):
+                self.detail = False
+                return False
+            return False
         if VIEWS[self.view] == "live" and self.detail:
             if self.act_open:
                 if key == ord("Q"):
@@ -1219,8 +1364,20 @@ class SuiteTui(TuiApp):
         if key == 9:                                  # tab
             self.view = (self.view + 1) % len(VIEWS)
             self.scroll = 0
+        elif key == ord("S"):
+            if VIEWS[self.view] == "live" and self.live_section == 2:
+                self.graded_desc = not self.graded_desc
+            elif VIEWS[self.view] == "live" and self.live_section == 1:
+                self.sum_desc = not self.sum_desc
         elif key == ord("s"):
-            self.sort = (self.sort + 1) % len(SORTS)
+            if VIEWS[self.view] == "live" and self.live_section == 2:
+                self.graded_sort = (self.graded_sort + 1) % len(GRADED_SORTS)
+                self.graded_scroll = 0
+            elif VIEWS[self.view] == "live" and self.live_section == 1:
+                self.sum_sort = (self.sum_sort + 1) % len(SUM_SORTS)
+                self.sum_scroll = 0
+            else:
+                self.sort = (self.sort + 1) % len(SORTS)
         elif key == ord("/"):
             self.editing, self.buf = True, self.pattern
         elif key == ord("F"):
@@ -1248,19 +1405,17 @@ class SuiteTui(TuiApp):
                 self.live_cursor += 1
                 self._anchor_live()
             else:
-                self.cursor += 1
-                self.scroll += 1
+                self._move_rows(1)
         elif key in (ord("k"), C.KEY_UP):
             if VIEWS[self.view] == "live":
                 self.live_cursor = max(0, self.live_cursor - 1)
                 self._anchor_live()
             else:
-                self.cursor = max(0, self.cursor - 1)
-                self.scroll = max(0, self.scroll - 1)
+                self._move_rows(-1)
         elif key == C.KEY_NPAGE:
-            self.scroll += 10
+            self._move_rows(10)
         elif key == C.KEY_PPAGE:
-            self.scroll = max(0, self.scroll - 10)
+            self._move_rows(-10)
         return False
 
 

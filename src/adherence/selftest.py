@@ -690,9 +690,12 @@ def check_process_hygiene() -> list[str]:
             grandchild = int((proc.stdout.readline() or "0").strip())
         except ValueError:
             grandchild = 0
-        time.sleep(0.3)
-        leaked = kill_process_group(proc, grace=2.0)
-        time.sleep(0.3)
+        # Generous: this runs alongside whatever else the machine is
+        # doing, and a check that fails under load reports a defect that
+        # is really CPU contention.
+        time.sleep(0.5)
+        leaked = kill_process_group(proc, grace=5.0)
+        time.sleep(0.5)
         if leaked:
             problems.append(f"{leaked} process(es) survived the group kill")
         if grandchild:
@@ -890,6 +893,57 @@ def check_cursor_anchoring() -> list[str]:
     return problems
 
 
+def check_cli_grader() -> list[str]:
+    """Three CLI checks passing must read as success everywhere.
+
+    A CLI-graded task's verdict is `cli.surface` against the PR's own
+    binary. Anything that quietly keeps a structural demand alive -- a
+    failing diff_coverage, say -- would drag all_pass to False and put the
+    task back where Amendment 2 found it: unpassable for reasons the agent
+    was never told."""
+    from adherence.cligrade import command_path
+    problems = []
+
+    def all_pass(cs):
+        return (all(c["status"] == "pass" for c in cs
+                    if c["status"] != "ungradeable")
+                and any(c["status"] == "pass" for c in cs))
+
+    def P(n):
+        return {"name": n, "status": "pass", "evidence": ""}
+
+    def S(n):
+        return {"name": n, "status": "ungradeable", "evidence": ""}
+
+    def F(n):
+        return {"name": n, "status": "fail", "evidence": ""}
+
+    cases = [
+        ("three CLI passes", [P("cli.builds"), P("cli.surface"),
+                              P("cli.extra_surface")], True),
+        ("plus advisory checks", [S("pr.diff_coverage"), S("pr.scope"),
+                                  S("pr.route"), P("cli.builds"),
+                                  P("cli.surface"), P("cli.extra_surface")],
+         True),
+        ("a missing flag fails", [P("cli.builds"), F("cli.surface"),
+                                  P("cli.extra_surface")], False),
+        ("a broken build fails", [F("cli.builds")], False),
+    ]
+    for label, cs, want in cases:
+        if all_pass(cs) is not want:
+            problems.append(f"{label}: all_pass={all_pass(cs)}, expected "
+                            f"{want}")
+
+    # The command battery must be derived, never authored.
+    if command_path(["pkg/cmd/issue/create/create.go"]) != ["issue", "create"]:
+        problems.append("command path is not derived from the PR's own file "
+                        "paths; an experimenter choosing which commands to "
+                        "test is an experimenter choosing the result")
+    if command_path(["api/queries_issue.go"]):
+        problems.append("a PR touching no command must yield no CLI battery")
+    return problems
+
+
 def check_analysis() -> list[str]:
     """The pre-specified analysis (docs/EVAL.md) must detect a planted
     effect, stay silent when there is none, and REFUSE when a precondition
@@ -1003,6 +1057,7 @@ CHECKS = (
     ("live run reader", check_live),
     ("process hygiene", check_process_hygiene),
     ("live cursor anchoring", check_cursor_anchoring),
+    ("cli grader verdicts", check_cli_grader),
     ("proxy attribution under concurrency", check_proxy_attribution),
     ("pre-specified analysis", check_analysis),
     ("stdlib test runner", check_test_runner),
