@@ -523,12 +523,26 @@ class SuiteTui(TuiApp):
     def view_calib(self, body, max_x):
         C = self.curses
         if not self.proxy_rows:
-            self._put(3, 3, "no proxy log loaded — pass --proxy runs/"
-                            "proxy.jsonl, or run under bench/with-proxy.sh",
-                      C.A_DIM)
-            self._put(5, 3, "Without it the adapter's token counts are "
-                            "unverified: design §3.2 makes the proxy "
-                            "authoritative, not the adapter.", C.A_DIM)
+            # The old text pointed at bench/with-proxy.sh, which does not
+            # exist and never did, and omitted the reason this tab is empty
+            # for most runs: the gate cannot be measured in parallel at all.
+            self._put(3, 3, "no proxy log loaded. The recording proxy runs "
+                            "only when ADH_PROXY_LOG is set:", C.A_DIM)
+            self._put(4, 5, "ADH_PROXY_LOG=runs/proxy.jsonl make all "
+                            "TRIALS=5 JOBS=1", C.A_BOLD)
+            self._put(5, 5, "make matrix PROXY=runs/proxy.jsonl", C.A_BOLD)
+            self._put(7, 3, "JOBS=1 is not optional. The proxy carries one "
+                            "trial mark at a time and nothing in an "
+                            "inference request", C.A_DIM)
+            self._put(8, 3, "identifies its trial, so under --jobs>1 the "
+                            "runner skips the mark rather than writing a "
+                            "wrong attribution.", C.A_DIM)
+            self._put(9, 3, "The H4 gate therefore has to be measured "
+                            "serially — that is the second cost of "
+                            "parallelism (§16.4).", C.A_DIM)
+            self._put(11, 3, "Without it the adapter's token counts are "
+                             "unverified: design §3.2 makes the proxy "
+                             "authoritative, not the adapter.", C.A_DIM)
             return 0, 0
         cal = sd.calibration(self.rows, self.proxy_rows)
         if not cal:
