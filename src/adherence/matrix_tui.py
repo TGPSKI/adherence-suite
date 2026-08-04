@@ -26,14 +26,20 @@ import sys
 import time
 from pathlib import Path
 
+from adherence import design as dz
 from adherence import live as lv
 from adherence import suitedata as sd
+from adherence import tasks as tk
 from adherence.tui.framework import TuiApp, curses_main
 
-VIEWS = ("live", "cells", "arms", "cost", "calib")
+VIEWS = ("live", "tasks", "design", "cells", "arms", "cost", "calib")
 VIEW_HELP = {
     "live": "running · graded · per arm×scenario   [h/l] section  "
             "[j/k] row  [space] detail",
+    "tasks": "what each scenario asks for and how it is judged — no run "
+             "data   [j/k] row  [space] detail",
+    "design": "what each arm is, how they differ, and the run's ground "
+              "rules   [j/k] row  [space] detail",
     "cells": "every (arm, scenario) cell   [j/k] row  [space] detail "
              "(median/mean/p90)",
     "arms": "per-arm rollup; ratios are paired on scenario, geometric",
@@ -90,6 +96,9 @@ class SuiteTui(TuiApp):
         self.sum_scroll = 0
         self.graded_sort = 0
         self.sum_sort = 0
+        self._tasks = None       # static; loaded once, never per tick
+        self._design = None
+        self.pane_scroll = 0     # shared by the scrollable detail panes
         # Direction is separate from key, so [S] flips without losing the
         # column you picked. Defaults are the useful end: newest graded
         # first, cheapest cell first.
@@ -212,7 +221,8 @@ class SuiteTui(TuiApp):
         `cursor` -- so holding [j] walked the selection off the end of the
         list, the highlight vanished, and [space] then opened a detail
         pane for a row that was never on screen."""
-        n = len(self.visible())
+        n = (len(self.task_rows()) if VIEWS[self.view] == "tasks"
+             else len(self.visible()))
         if not n:
             self.cursor = self.scroll = 0
             return
@@ -340,6 +350,24 @@ class SuiteTui(TuiApp):
         cs = self.visible()
         total = avail = 0
         v = VIEWS[self.view]
+        if v == "tasks":
+            rows = self.task_rows()
+            if self.detail and rows:
+                self.cursor = max(0, min(self.cursor, len(rows) - 1))
+                self.view_task_detail(rows[self.cursor], max_y, max_x)
+            else:
+                total, avail = self.view_tasks(rows, body, max_x)
+            self.footer(max_y, max_x, total, avail)
+            return
+        if v == "design":
+            rows = self.design_rows()
+            if self.detail and rows:
+                self.cursor = max(0, min(self.cursor, len(rows) - 1))
+                self.view_design_detail(rows[self.cursor], max_y, max_x)
+            else:
+                total, avail = self.view_design(rows, body, max_x)
+            self.footer(max_y, max_x, total, avail)
+            return
         if v == "live":
             # Deliberately not filtered by `pattern`: that filter is a
             # results-side idea (arm/scenario cells), and silently hiding a
@@ -929,6 +957,202 @@ class SuiteTui(TuiApp):
               f"/{len(lines)} lines"
         self._put(max_y - 2, max(0, max_x - len(pos) - 3), pos, C.A_DIM)
 
+    def task_rows(self):
+        """Scenario descriptions, filtered by the same grammar as cells."""
+        if self._tasks is None:
+            try:
+                self._tasks = tk.load()
+            except Exception:
+                self._tasks = []
+        return [t for t in self._tasks
+                if sd.matches(t["id"], self.pattern)]
+
+    def view_tasks(self, rows, body, max_x):
+        C = self.curses
+        if not rows:
+            self._put(3, 3, "no scenarios found", C.A_DIM)
+            return 0, 0
+        s = tk.summarize(rows)
+        self._put(3, 1, f"{s['n']} scenarios — {s['unit']} judged by the "
+                        f"PR's unit tests, {s['cli']} at the command line, "
+                        f"{s['synthetic']} synthetic", C.A_BOLD)
+        self._put(4, 1, f"{'scenario':<20}{'PR':>7}{'grader':>8}{'files':>7}"
+                        f"{'dirs':>6}  what it asks for", C.A_DIM)
+        avail = max(1, body - 3)
+        self.cursor = max(0, min(self.cursor, len(rows) - 1))
+        if self.cursor < self.scroll:
+            self.scroll = self.cursor
+        elif self.cursor >= self.scroll + avail:
+            self.scroll = self.cursor - avail + 1
+        self.scroll = max(0, min(self.scroll, max(0, len(rows) - avail)))
+        for i, t in enumerate(rows[self.scroll:self.scroll + avail]):
+            y, idx = 5 + i, self.scroll + i
+            base = C.color_pair(5) if idx == self.cursor else 0
+            self._put(y, 1, f"{t['id'][:19]:<20}", base)
+            self._put(y, 21, f"{str(t['pr'] or '—'):>7}", C.A_DIM)
+            # cli-graded is the exception and worth spotting at a glance.
+            self._put(y, 28, f"{t['grader'] or '—':>8}",
+                      C.color_pair(3) if t["grader"] == "cli" else C.A_DIM)
+            self._put(y, 36, f"{len(t['code_files']):>7}", C.A_DIM)
+            self._put(y, 43, f"{len(t['dirs']):>6}", C.A_DIM)
+            self._put(y, 51, t["title"][:max(0, max_x - 53)], base)
+        self.scrollbar(5, avail, max_x - 2, len(rows), self.scroll)
+        return len(rows), avail
+
+    def view_task_detail(self, t, max_y, max_x):
+        """One scenario: what it asks, where the answer lives, how it is
+        judged, and what a verdict from that grader does and does not
+        mean."""
+        C = self.curses
+        w = max_x - 4
+        self._put(3, 1, f"{t['id']}"
+                        + (f"   PR #{t['pr']}" if t["pr"] else "")
+                        + f"   base {t['base_commit']}", C.A_BOLD)
+        self._put(4, 1, t["title"][:w], 0)
+
+        y = 6
+        label, meaning = tk.GRADER_MEANING.get(
+            t["grader"], ("(no PR grader)", "Synthetic scenario: its own "
+                                            "grade.py decides."))
+        self._put(y, 1, "judged by", C.A_DIM)
+        self._put(y, 16, label,
+                  C.color_pair(3) if t["grader"] == "cli" else 0)
+        y += 1
+        for ln in self._wrap(meaning, w - 16):
+            if y >= max_y - 4:
+                break
+            self._put(y, 16, ln, C.A_DIM)
+            y += 1
+        if t["invented"]:
+            self._put(y, 16, "forced by: " + ", ".join(t["invented"][:6]),
+                      C.A_DIM)
+            y += 1
+        y += 1
+
+        for label, value in (
+            ("answer lives in", ", ".join(t["dirs"][:6]) or "—"),
+            ("files the PR hit", f"{len(t['code_files'])}: "
+                                 + ", ".join(t["code_files"][:4])),
+            ("checked with", t["test_cmd"] or "CLI flag comparison"),
+            ("timeout", f"{t['timeout']}s"),
+        ):
+            self._put(y, 1, f"{label:<15}", C.A_DIM)
+            self._put(y, 16, str(value)[:w - 16])
+            y += 1
+        y += 1
+
+        self._put(y, 1, f"prompt ({t['prompt_lines']} lines) — this is all "
+                        f"the agent is given", C.A_BOLD)
+        y += 1
+        # Keep the author's line breaks; a PR body is headings and tables.
+        lines = []
+        for raw in t["prompt"].splitlines():
+            lines += self._wrap(raw, w - 4) or [""]
+        self._pane(lines, y, max_y, max_x)
+
+    def _pane(self, lines, y0, max_y, max_x, x=3):
+        """Draw a list of lines in the space that is left, with a scrollbar.
+
+        Detail panes used to render until they ran out of screen and then
+        simply stop -- on a short terminal the prompt was cut with nothing
+        saying so and no way to see the rest."""
+        rows = max(1, max_y - y0 - 2)
+        self.pane_scroll = max(0, min(self.pane_scroll,
+                                      max(0, len(lines) - rows)))
+        for i, ln in enumerate(lines[self.pane_scroll:
+                                     self.pane_scroll + rows]):
+            self._put(y0 + i, x, ln[:max_x - x - 3], ln.attr
+                      if hasattr(ln, "attr") else 0)
+        if len(lines) > rows:
+            self.scrollbar(y0, rows, max_x - 2, len(lines), self.pane_scroll)
+            pos = (f"{self.pane_scroll + 1}-"
+                   f"{min(self.pane_scroll + rows, len(lines))}"
+                   f"/{len(lines)}   [j/k] scrolls")
+            self._put(max_y - 2, max(0, max_x - len(pos) - 3), pos,
+                      self.curses.A_DIM)
+
+    def design_rows(self):
+        if self._design is None:
+            try:
+                self._design = dz.load()
+            except Exception:
+                self._design = []
+        return self._design
+
+    def view_design(self, rows, body, max_x):
+        C = self.curses
+        if not rows:
+            self._put(3, 3, "no arms materialized — run `make trees` or "
+                            "point ARMSDIR at a built arms directory",
+                      C.A_DIM)
+            return 0, 0
+        d = dz.deltas(rows)
+        self._put(3, 1, "arms — instruction surface measured off disk, not "
+                        "described", C.A_BOLD)
+        self._put(4, 1, f"{'arm':<5}{'name':<22}{'always':>9}{'vs a1':>9}"
+                        f"{'on demand':>11}{'sha':>10}  role", C.A_DIM)
+        avail = max(1, body - 3)
+        self.cursor = max(0, min(self.cursor, len(rows) - 1))
+        for i, r in enumerate(rows[:avail]):
+            y = 5 + i
+            base = C.color_pair(5) if i == self.cursor else 0
+            self._put(y, 1, f"{r['arm']:<5}", base)
+            self._put(y, 6, f"{r['name']:<22}", base)
+            if not r["present"]:
+                self._put(y, 28, f"{'not built':>9}", C.A_DIM)
+                continue
+            self._put(y, 28, f"{r['always_bytes']:>9,}", C.color_pair(2))
+            self._put(y, 37, f"{d[r['arm']]:>+9,}", C.A_DIM)
+            self._put(y, 46, f"{r['ondemand_bytes']:>11,}",
+                      C.color_pair(3) if r["ondemand_bytes"] else C.A_DIM)
+            self._put(y, 57, f"{r['sha8']:>10}", C.A_DIM)
+            self._put(y, 69, r["role"][:max(0, max_x - 71)], C.A_DIM)
+        y = 5 + min(len(rows), avail) + 1
+        self._put(y, 1, "ground rules — [space] on an arm for its purpose "
+                        "and files", C.A_BOLD)
+        y += 1
+        for k, v in dz.GROUND_RULES:
+            if y >= body + 2:
+                break
+            self._put(y, 3, f"{k}", 0)
+            for ln in self._wrap(v, max_x - 30)[:1]:
+                self._put(y, 30, ln, C.A_DIM)
+            y += 1
+        return 0, 0
+
+    def view_design_detail(self, r, max_y, max_x):
+        C = self.curses
+        self._put(3, 1, f"{r['arm']} — {r['name']}", C.A_BOLD)
+        self._put(4, 1, r["role"], C.A_DIM)
+        lines = []
+        lines += self._wrap(r["purpose"], max_x - 8) + [""]
+        lines.append(f"always loaded   {r['always_bytes']:,} B   "
+                     f"{', '.join(r['always_files']) or '(none)'}")
+        lines.append(f"on demand       {r['ondemand_bytes']:,} B   "
+                     f"{len(r['ondemand_files'])} file(s)")
+        if r["ondemand_files"]:
+            lines += ["    " + f for f in r["ondemand_files"][:12]]
+        lines.append(f"surface sha     {r['sha8'] or '—'}")
+        lines += ["", "ground rules this run is bound by", ""]
+        for k, v in dz.GROUND_RULES:
+            lines.append(k)
+            lines += ["    " + x for x in self._wrap(v, max_x - 12)]
+            lines.append("")
+        self._pane(lines, 6, max_y, max_x)
+
+    @staticmethod
+    def _wrap(text, width):
+        out, cur = [], ""
+        for word in str(text).split():
+            if len(cur) + len(word) + 1 > width and cur:
+                out.append(cur)
+                cur = word
+            else:
+                cur = f"{cur} {word}".strip()
+        if cur:
+            out.append(cur)
+        return out
+
     def view_cells(self, cs, body, max_x):
         C = self.curses
         self._put(3, 1, f"{'arm/scenario':<20}{'trials':>7}{'pass@1':>8}"
@@ -1407,6 +1631,7 @@ class SuiteTui(TuiApp):
             self.scroll = 0
         elif key == ord(" "):
             self.detail = not self.detail
+            self.pane_scroll = 0
             if self.detail:
                 # Open on the newest event; that is what "what is it doing"
                 # means for a run still in flight.
@@ -1417,12 +1642,16 @@ class SuiteTui(TuiApp):
             if VIEWS[self.view] == "live":
                 self.live_cursor += 1
                 self._anchor_live()
+            elif self.detail and VIEWS[self.view] in ("tasks", "design"):
+                self.pane_scroll += 1
             else:
                 self._move_rows(1)
         elif key in (ord("k"), C.KEY_UP):
             if VIEWS[self.view] == "live":
                 self.live_cursor = max(0, self.live_cursor - 1)
                 self._anchor_live()
+            elif self.detail and VIEWS[self.view] in ("tasks", "design"):
+                self.pane_scroll = max(0, self.pane_scroll - 1)
             else:
                 self._move_rows(-1)
         elif key == C.KEY_NPAGE:
