@@ -163,8 +163,16 @@ class SuiteTui(TuiApp):
         total = avail = 0
         v = VIEWS[self.view]
         if not cs and v != "calib":
-            self._put(3, 3, "no cells match this filter — [F] clears it",
-                      self.curses.A_DIM)
+            # Nothing on screen has two very different causes, and blaming
+            # the filter when the run simply has not written a result yet
+            # sends you hunting for a filter you never set.
+            if not self.cells:
+                msg = ("waiting for the first result — the run has not "
+                       "finished a trial yet" if self.expect else
+                       "no results in the file(s) named")
+            else:
+                msg = "no cells match this filter — [F] clears it"
+            self._put(3, 3, msg, self.curses.A_DIM)
         elif self.detail and v == "cells":
             self.cursor = max(0, min(self.cursor, len(cs) - 1))
             self.view_detail(cs[self.cursor], max_y, max_x)
