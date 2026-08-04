@@ -651,8 +651,27 @@ def check_live() -> list[str]:
         runs = lv.snapshot(tmp=tmp)
         if not runs or runs[0]["arm"] != "a3" or runs[0]["trial"] != 2:
             problems.append("a marked run did not report its own arm/trial")
-        elif runs[0]["budget"] is None:
-            problems.append("budget not computed despite a known timeout")
+        elif runs[0]["budget"] is not None:
+            problems.append(
+                f"budget {runs[0]['budget']} reported for a run in state "
+                f"{runs[0]['state']!r}. The adapter deadline governs a trial "
+                f"that is still generating; a finished one is not racing "
+                f"anything and its clock read 104% before this was fixed")
+
+        # ...and while a trial IS running, the budget is a real fraction and
+        # never exceeds the whole.
+        real_busy = lv.busy_out_dirs
+        lv.busy_out_dirs = lambda: {str(d)}
+        try:
+            runs = lv.snapshot(tmp=tmp)
+        finally:
+            lv.busy_out_dirs = real_busy
+        if not runs or runs[0]["state"] != "running":
+            problems.append("a run whose out-dir is held by a live process "
+                            "must read as running")
+        elif runs[0]["budget"] is None or not 0 <= runs[0]["budget"] <= 1:
+            problems.append(f"budget {runs[0]['budget']} outside [0,1] for a "
+                            f"running trial")
     return problems
 
 
