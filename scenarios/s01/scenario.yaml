@@ -1,0 +1,3 @@
+category: debug
+timeout: 300
+prompt: "the makefile target capture-help is broken and only captures duplicates"

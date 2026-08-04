@@ -1,0 +1,33 @@
+# adherence-suite is stdlib-only; ruff is the one dev-time tool, never a
+# runtime import. Fixture trees under scenarios/*/fixture/ are deliberately
+# broken code — they are the thing under test, not code to lint.
+line-length = 100
+target-version = "py310"
+
+exclude = [
+    "scenarios/*/fixture",
+    "fixtures",
+    "bench/.xdg",
+    "runs",
+    # Vendored verbatim from leather (see README, License). Upstream owns
+    # the API; reformatting it here would guarantee a conflict on the next
+    # re-copy for no benefit.
+    "src/adherence/tui",
+]
+
+[lint]
+select = [
+    "E",    # pycodestyle
+    "F",    # pyflakes
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplify
+]
+ignore = [
+    "E501",  # line length is enforced by review, not by a hard error
+]
+
+[lint.per-file-ignores]
+# Graders are loaded by path by the runner, not imported as modules.
+"scenarios/*/grade.py" = ["F821"]

@@ -1,0 +1,183 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (saves runner minutes on busy PRs).
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────
+  # Fast-feedback gate. Runs on every push and PR.
+  # The suite validates itself with no model, no GPU and no network, so the
+  # whole thing runs here — an eval whose correctness can only be checked by
+  # running the eval is not checkable.
+  # Both ends of the supported range: the floor, and the bleeding-edge
+  # interpreter the stdlib-only stance exists to survive.
+  # ─────────────────────────────────────────────────────────────────────────
+  validate:
+    name: Validate (${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.14"]
+
+    steps:
+      - name: Checkout
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Python
+        # actions/setup-python v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Show interpreter
+        run: python -VV
+
+      - name: Compile, schema, selftest
+        run: make check PYTHON=python
+
+      # The "nothing to install" claim is invisible on a machine that happens
+      # to have pytest. Break the import outright so the stdlib fallback in
+      # lib/run_tests.py is what actually runs. Before that fallback existed,
+      # s12 failed here unconditionally and blamed the agent.
+      - name: Still green with pytest unavailable
+        run: |
+          set -euo pipefail
+          stub="$(mktemp -d)"
+          printf 'raise ImportError("No module named pytest")\n' > "$stub/pytest.py"
+          # `python -m pytest` is *supposed* to fail here — that is the whole
+          # point — so capture it rather than piping, which under pipefail
+          # would abort on the expected non-zero exit.
+          out="$(PYTHONPATH="$stub" python -m pytest --version 2>&1 || true)"
+          case "$out" in
+            *"No module named pytest"*) ;;
+            *) echo "::error::stub did not take; pytest is still importable"
+               echo "$out"; exit 1 ;;
+          esac
+          PYTHONPATH="$stub" make selftest PYTHON=python
+
+      - name: Arm materializer — A2 must equal A3 byte-for-byte
+        run: |
+          set -euo pipefail
+          repo="$(mktemp -d)"
+          mkdir -p "$repo/.subagents"
+          printf '# Router\n\n| domain | context |\n| --- | --- |\n| api | .subagents/api.md |\n' > "$repo/AGENTS.md"
+          printf '# API\n\nHandlers live in src/api.\n' > "$repo/.subagents/api.md"
+          printf '# DB\n\nMigrations are append-only.\n' > "$repo/.subagents/db.md"
+          PYTHONPATH=src python -m adherence.mkarms --repo "$repo" --out "$(mktemp -d)/arms" --seed 3
+
+      - name: Shell syntax
+        run: bash -n adapters/*.sh bench/*.sh
+
+      # Vendored fixture mirrors and warmed dependency caches are hundreds of
+      # MB to several GB and are reproducible from docs/FIXTURES.md. Catch one
+      # here rather than in someone's clone.
+      - name: No large or vendored files committed
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '^fixtures/.*\.(git|cache)/'; then
+            echo "::error::vendored fixture data committed — see .gitignore"
+            exit 1
+          fi
+          big="$(git ls-files -z | xargs -0 -I{} find {} -size +2M -print)"
+          if [ -n "$big" ]; then
+            echo "::error::files over 2MB committed:"; echo "$big"; exit 1
+          fi
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Lint. Separate job so a style failure doesn't mask a real test failure.
+  # ─────────────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Python
+        # actions/setup-python v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.14"
+
+      - name: Install ruff
+        run: python -m pip install ruff
+
+      - name: Ruff
+        run: ruff check .
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Cross-platform, full-scope checks.
+  # Triggers:
+  #   - PR carrying the `full-test` label
+  #   - manual `workflow_dispatch`
+  #   - any push to `main`
+  # ─────────────────────────────────────────────────────────────────────────
+  full-scope:
+    name: Full-scope (${{ matrix.label }})
+    needs: validate
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+        contains(github.event.pull_request.labels.*.name, 'full-test')) ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux/arm64
+            os: ubuntu-24.04-arm
+          - label: macos/arm64
+            os: macos-14
+          - label: windows/amd64
+            os: windows-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        # actions/checkout v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up Python
+        # actions/setup-python v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.14"
+
+      - name: Show toolchain
+        run: python -VV
+
+      # Invoked directly rather than through make: the Makefile assumes POSIX
+      # tooling, and the point of this job is that the Python itself is
+      # portable. Graders shell out through sys.executable for the same
+      # reason — `python3` is not a command on Windows.
+      - name: Schema goldens
+        run: python -m adherence.schema
+        env:
+          PYTHONPATH: src
+
+      - name: Graders, cost metrics, test runner
+        run: python -m adherence.selftest
+        env:
+          PYTHONPATH: src

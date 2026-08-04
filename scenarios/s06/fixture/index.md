@@ -1,0 +1,31 @@
+# Index
+
+- `/usr/bin/opencode`
+- `/usr/bin/opencode acp`
+- `/usr/bin/opencode agent`
+- `/usr/bin/opencode agent agent`
+- `/usr/bin/opencode attach`
+- `/usr/bin/opencode completion`
+- `/usr/bin/opencode db`
+- `/usr/bin/opencode db db`
+- `/usr/bin/opencode debug`
+- `/usr/bin/opencode debug debug`
+- `/usr/bin/opencode export`
+- `/usr/bin/opencode github`
+- `/usr/bin/opencode github github`
+- `/usr/bin/opencode import`
+- `/usr/bin/opencode mcp`
+- `/usr/bin/opencode mcp mcp`
+- `/usr/bin/opencode models`
+- `/usr/bin/opencode plugin`
+- `/usr/bin/opencode pr`
+- `/usr/bin/opencode providers`
+- `/usr/bin/opencode providers providers`
+- `/usr/bin/opencode run`
+- `/usr/bin/opencode serve`
+- `/usr/bin/opencode session`
+- `/usr/bin/opencode session session`
+- `/usr/bin/opencode stats`
+- `/usr/bin/opencode uninstall`
+- `/usr/bin/opencode upgrade`
+- `/usr/bin/opencode web`

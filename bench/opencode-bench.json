@@ -1,0 +1,118 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  "provider": {
+    "local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "local",
+      "options": { "baseURL": "http://127.0.0.1:8000/v1" },
+      "models": {
+        "qwen36-27b-nvfp4": {
+          "name": "qwen36-27b-nvfp4",
+          "limit": { "context": 88600, "output": 8192 }
+        },
+        "qwen36-35b-a3b-nvfp4": {
+          "name": "qwen36-35b-a3b-nvfp4",
+          "limit": { "context": 228000, "output": 8192 }
+        }
+      }
+    }
+  },
+
+  "mcp": {},
+
+  "permission": {
+    "external_directory": {
+      "*": "deny"
+    },
+    "edit": {
+      "*": "allow",
+      "~/**": "deny",
+      "/etc/**": "deny",
+      "/usr/**": "deny",
+      "/var/**": "deny",
+      "/opt/**": "deny",
+      "/boot/**": "deny",
+      "*.pem": "deny",
+      "*.key": "deny"
+    },
+    "read": {
+      "*": "allow",
+      "~/.ssh/**": "deny",
+      "~/.aws/**": "deny",
+      "~/.gnupg/**": "deny",
+      "~/.config/**": "deny",
+      "~/.secrets/**": "deny",
+      "/proc/**": "deny",
+      "*.pem": "deny",
+      "*.key": "deny"
+    },
+    "grep": {
+      "*": "allow",
+      "~/.ssh/**": "deny",
+      "~/.aws/**": "deny",
+      "~/.gnupg/**": "deny",
+      "~/.config/**": "deny"
+    },
+    "glob": {
+      "*": "allow"
+    },
+    "bash": {
+      "*": "allow",
+      "sudo *": "deny",
+      "su *": "deny",
+      "ssh *": "deny",
+      "scp *": "deny",
+      "sftp *": "deny",
+      "rsync *": "deny",
+      "curl *": "deny",
+      "wget *": "deny",
+      "nc *": "deny",
+      "ncat *": "deny",
+      "socat *": "deny",
+      "git push*": "deny",
+      "git remote*": "deny",
+      "git fetch*": "deny",
+      "git pull*": "deny",
+      "systemctl *": "deny",
+      "journalctl *": "deny",
+      "crontab *": "deny",
+      "at *": "deny",
+      "nohup *": "deny",
+      "disown *": "deny",
+      "shutdown *": "deny",
+      "reboot *": "deny",
+      "poweroff *": "deny",
+      "dd *": "deny",
+      "mkfs *": "deny",
+      "mount *": "deny",
+      "umount *": "deny",
+      "nft *": "deny",
+      "iptables *": "deny",
+      "chown *": "deny",
+      "kill *": "deny",
+      "pkill *": "deny",
+      "killall *": "deny",
+      "podman *": "deny",
+      "docker *": "deny",
+      "pip install *": "deny",
+      "pip3 install *": "deny",
+      "npm install *": "deny",
+      "npx *": "deny",
+      "go install *": "deny",
+      "opencode *": "deny",
+      "rm -rf /*": "deny",
+      "rm -fr /*": "deny"
+    }
+  },
+
+  "agent": {
+    "debug": {
+      "mode": "subagent",
+      "model": "local/qwen36-35b-a3b-nvfp4",
+      "temperature": 0.1,
+      "maxSteps": 20,
+      "prompt": "You are a debugging specialist. Form one explicit hypothesis, write and run the smallest test that isolates it, analyze the output, and either apply the fix or loop with a new hypothesis. Never make more than five edits. Summarize: root cause, fix applied or why not."
+    }
+  }
+}

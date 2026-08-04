@@ -1,0 +1,8 @@
+Commands:
+  opencode completion          generate shell completion script
+  opencode acp                 start ACP server
+  opencode mcp                 manage MCP servers
+  opencode run [message..]     run with a message
+
+Options:
+  -h, --help  show help

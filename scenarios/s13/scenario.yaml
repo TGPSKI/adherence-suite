@@ -1,0 +1,4 @@
+category: pipeline
+timeout: 600
+agent: executor
+prompt: "Execute plans/01-fix-clamp.md"

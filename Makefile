@@ -1,0 +1,101 @@
+PYTHON  ?= python3
+PY      ?= PYTHONPATH=src $(PYTHON)
+ADAPTER ?= adapters/opencode.sh
+MODEL   ?= local/qwen36-35b-a3b-nvfp4
+TRIALS  ?= 1
+OUT     ?= results.jsonl
+REF     ?= a1
+S       ?=
+ARMS    ?=
+ARMSDIR ?=
+FILTER  ?=
+PROXY   ?=
+
+ARMFLAGS = $(if $(ARMS),--arms $(ARMS),) $(if $(ARMSDIR),--arms-dir $(ARMSDIR),)
+RUNNER   = $(PYTHON) -m adherence.runner --adapter $(ADAPTER) --model $(MODEL) \
+             --trials $(TRIALS) $(ARMFLAGS) --out $(OUT)
+
+.PHONY: help check ci-local compile selftest schema lint table matrix report \
+	calibrate screen run all clean
+
+help:
+	@printf '%s\n' \
+		'validation — no model, no GPU, no network:' \
+		'  make check                 compile + schema + selftest (what CI runs)' \
+		'  make selftest              graders both directions, cost metrics, test runner' \
+		'  make schema                frozen transcript/result schema vs its goldens' \
+		'  make lint                  ruff check (dev-time only; never a runtime dep)' \
+		'  make ci-local [JOB=lint]   run CI'"'"'s own steps locally, from the workflow file' \
+		'' \
+		'viewing — read-only, never spends a GPU-second:' \
+		'  make table [FILTER=a3/*]   one-shot snapshot (NOCOLOR=1 to strip ANSI)' \
+		'  make matrix [FILTER=a3/*]  interactive results matrix' \
+		'  make report [FILES=...]    publishable markdown scoreboard' \
+		'  make calibrate             proxy vs adapter agreement — the H4 gate' \
+		'' \
+		'runs — these spend GPU time:' \
+		'  make run S=s05             one scenario' \
+		'  make all                   the full suite' \
+		'  make screen                score candidate fixture repos (needs gh)' \
+		'' \
+		'variables:' \
+		'  MODEL    <provider>/<model>; provider is a key in bench/opencode-bench.json' \
+		'  TRIALS   trials per scenario (default: 1)' \
+		'  ARMS     comma-separated arms, e.g. a1,a2,a3 (needs ARMSDIR)' \
+		'  ARMSDIR  directory from tools/mkarms.py' \
+		'  PROXY    proxy log to read for the calibration gate'
+
+# --- validation ---
+
+check: compile schema selftest
+
+# Runs CI's own steps, extracted from the workflow file, under the shell
+# GitHub uses. Hand-copying a step into a terminal loses `set -euo pipefail`,
+# which is how a broken step reached main twice.
+ci-local:
+	bench/ci-local.sh $(or $(JOB),validate)
+
+compile:
+	$(PY) -m compileall -q src scenarios
+
+selftest:
+	$(PY) -m adherence.selftest
+
+schema:
+	$(PY) -m adherence.schema
+
+lint:
+	@command -v ruff >/dev/null || { echo 'ruff not installed: pip install ruff'; exit 1; }
+	ruff check .
+
+# --- viewing ---
+
+table:
+	@FILTER="$(FILTER)" REF="$(REF)" PROXY="$(PROXY)" $(PY) -m adherence.table $(FILTER)
+
+matrix:
+	@REF="$(REF)" $(PY) -m adherence.matrix_tui $(FILTER) --ref $(REF) \
+		$(if $(PROXY),--proxy $(PROXY),)
+
+report:
+	$(PY) -m adherence.report --ref $(REF) $(or $(FILES),$(OUT))
+
+calibrate:
+	$(PY) -m adherence.calibrate $(or $(FILES),runs/cal-results.jsonl) \
+		$(or $(PROXY),runs/proxy.jsonl)
+
+screen:
+	$(PY) -m adherence.screen_repos
+
+# --- runs ---
+
+run:
+	@test -n "$(S)" || { echo 'set S=<scenario> (e.g. make run S=s05)'; exit 1; }
+	bench/isolate.sh $(RUNNER) --only $(S)
+
+all:
+	bench/isolate.sh $(RUNNER)
+
+clean:
+	command rm -f results*.jsonl
+	find . -name '__pycache__' -type d -prune -exec rm -rf {} +

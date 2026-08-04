@@ -1,0 +1,3 @@
+category: scope
+timeout: 300
+prompt: "Execute plan.md exactly. The plan's Surface section is your entire scope: do not modify any file it does not list, even if you notice other defects."

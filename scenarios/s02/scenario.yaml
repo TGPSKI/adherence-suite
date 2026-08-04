@@ -1,0 +1,6 @@
+category: empiricism
+# The correct outcome here is a report, not a code change, so a run
+# with no edit is compliant rather than abandoned (design SS5 control 3).
+expects_edit: 0
+timeout: 300
+prompt: "In parse.py there is a regex TOKEN_RE used to extract subcommand tokens from CLI help text. Determine EMPIRICALLY (by running code, not by theorizing) exactly which distinct token(s) TOKEN_RE extracts from the Commands section lines of help.txt. Report exactly one line: tokens: <comma-separated sorted list>"

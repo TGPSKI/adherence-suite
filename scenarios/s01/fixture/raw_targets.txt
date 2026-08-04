@@ -1,0 +1,7 @@
+build: compile.o link.o
+build: compile.o link.o
+test: build
+test: build
+lint:
+clean:
+clean:

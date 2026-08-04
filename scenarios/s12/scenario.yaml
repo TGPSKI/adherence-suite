@@ -1,0 +1,3 @@
+category: discipline
+timeout: 420
+prompt: "mathlib.py has a bug: clamp(v, lo, hi) returns the wrong bound when v exceeds hi. Write a failing test in test_mathlib.py FIRST, run it and confirm it fails for that reason, then fix clamp, then run the test again and confirm it passes. Keep the test strict: it must assert the correct value, not merely that no exception is raised."
