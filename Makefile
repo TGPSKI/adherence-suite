@@ -119,8 +119,8 @@ mkscenarios:
 
 ## Difficulty probe: A1 only, no context generation. Answers "can these
 ## tasks discriminate?" before any of the expensive work.
+probe: SUITE := $(or $(SUITE),suite-pr.yaml)
 probe:
-	@test -n "$(SUITE)" || { echo 'usage: make probe SUITE=suite-pr.yaml [TRIALS=3]'; exit 1; }
 	@test -f "$(SUITE)" || { \
 		echo "no $(SUITE) yet. The probe runs last; build its inputs first:"; \
 		echo "  1. make mkpr REPO=<owner/name> MIRROR=<fixtures/x.git> SINCE=<YYYY-MM-DD> OUT=scenarios-pr/x"; \
