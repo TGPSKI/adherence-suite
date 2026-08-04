@@ -16,7 +16,7 @@ RUNNER   = $(PYTHON) -m adherence.runner --adapter $(ADAPTER) --model $(MODEL) \
              --trials $(TRIALS) $(ARMFLAGS) --out $(OUT)
 
 .PHONY: help check ci-local compile selftest schema lint table matrix report \
-	analyze floors live tasks design clean-runs calibrate screen mkpr mkscenarios trees probe run all clean
+	analyze floors live tasks design stop clean-runs calibrate screen mkpr mkscenarios trees probe run all clean
 
 help:
 	@printf '%s\n' \
@@ -32,6 +32,9 @@ help:
 		'                             it is judged (no run data)' \
 		'  make design                what each arm is + the ground rules' \
 		'  make live                  what is running right now, one-shot' \
+		'  make stop [YES=1]          stop a run, kill orphans, sweep temp' \
+		'                             (prints a plan unless YES=1; never' \
+		'                             deletes results -- rm those yourself)' \
 		'  make clean-runs            delete sandboxes/out-dirs from dead runs' \
 		'  make table [FILTER=a3/*]   one-shot snapshot (NOCOLOR=1 to strip ANSI)' \
 		'  make matrix [FILTER=a3/*]  interactive results matrix' \
@@ -87,6 +90,10 @@ lint:
 	ruff check .
 
 # --- viewing ---
+
+## Stop a run and reclaim what it left. Never deletes results.
+stop:
+	@$(PY) -m adherence.stoprun --out $(or $(OUT),runs/probe.jsonl) $(if $(YES),--yes,)
 
 tasks:
 	@$(PY) -m adherence.tasks
