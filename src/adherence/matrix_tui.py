@@ -339,6 +339,10 @@ class SuiteTui(TuiApp):
 
         # ---- running ---------------------------------------------------
         if runs:
+            self._put(y, 1, "running" + ("  ◀" if self.live_section == 0
+                                          else ""),
+                      C.color_pair(5) if self.live_section == 0 else C.A_DIM)
+            y += 1
             self._put(y, 1, f"{'scenario':<20}{'arm':>4}{'t':>3}{'state':>9}"
                             f"{'calls':>7}{'tools':>6}{'sub':>5}{'tok_in':>12}"
                             f"{'elapsed':>9}{'budget':>8}  doing", C.A_DIM)
@@ -346,7 +350,9 @@ class SuiteTui(TuiApp):
             self.live_cursor = max(0, min(self.live_cursor, len(runs) - 1))
             shown = runs[:max(1, min(len(runs), body - 12))]
             for i, r in enumerate(shown):
-                base = C.color_pair(5) if i == self.live_cursor else 0
+                base = (C.color_pair(5)
+                        if i == self.live_cursor and self.live_section == 0
+                        else 0)
                 self._put(y, 1, f"{r['scenario'][:19]:<20}", base)
                 self._put(y, 21, f"{r['arm']:>4}",
                           C.A_DIM if r["unlabelled"] else 0)
@@ -384,15 +390,22 @@ class SuiteTui(TuiApp):
         # not by what landed an hour ago.
         recent = sorted(self.rows, key=lambda r: r.get("_seq", 0))[-6:][::-1]
         if recent:
-            self._put(y, 1, "graded — most recent first", C.A_BOLD)
+            self._put(y, 1, "graded — most recent first"
+                            + ("  ◀" if self.live_section == 1 else ""),
+                      C.color_pair(5) if self.live_section == 1 else C.A_BOLD)
             y += 1
             self._put(y, 1, f"{'scenario':<20}{'arm':>4}{'t':>3}{'verdict':>9}"
                             f"{'calls':>7}{'tok_in':>12}{'dur':>9}  failing",
                       C.A_DIM)
             y += 1
-            for r in recent:
+            self.graded_cursor = max(0, min(self.graded_cursor,
+                                            len(recent) - 1))
+            for gi, r in enumerate(recent):
                 if y >= 3 + body - 6:
                     break
+                hl = (C.color_pair(5)
+                      if gi == self.graded_cursor and self.live_section == 1
+                      else 0)
                 m = r.get("metrics") or {}
                 ung = [c for c in r["checks"]
                        if c.get("name") == "adapter"
@@ -403,7 +416,7 @@ class SuiteTui(TuiApp):
                        C.color_pair(1) if r["all_pass"] else C.color_pair(4))
                 fails = ", ".join(c["name"] for c in r["checks"]
                                   if c["status"] == "fail") or "—"
-                self._put(y, 1, f"{r['scenario'][:19]:<20}")
+                self._put(y, 1, f"{r['scenario'][:19]:<20}", hl)
                 self._put(y, 21, f"{r.get('arm', '-'):>4}", C.A_DIM)
                 self._put(y, 25, f"{r['trial']:>3}", C.A_DIM)
                 self._put(y, 28, f"{verdict:>9}", col)
@@ -418,8 +431,9 @@ class SuiteTui(TuiApp):
         # ---- per (arm, scenario) rollup --------------------------------
         cells = sd.load_cells(paths=self.files)
         if cells:
-            self._put(y, 1, "per arm × scenario — pace and cost so far",
-                      C.A_BOLD)
+            self._put(y, 1, "per arm × scenario — pace and cost so far"
+                            + ("  ◀" if self.live_section == 2 else ""),
+                      C.color_pair(5) if self.live_section == 2 else C.A_BOLD)
             y += 1
             self._put(y, 1, f"{'arm/scenario':<24}{'done':>6}{'ung':>5}"
                             f"{'pass':>6}{'med tok':>11}{'p90 tok':>11}"
@@ -431,12 +445,16 @@ class SuiteTui(TuiApp):
             per_cell = 0
             if self.expect and cells:
                 per_cell = max(1, round(self.expect / max(1, len(cells))))
-            for c in cells:
+            self.sum_cursor = max(0, min(self.sum_cursor, len(cells) - 1))
+            for ci, c in enumerate(cells):
                 if y >= 3 + body - 1:
                     break
+                hl = (C.color_pair(5)
+                      if ci == self.sum_cursor and self.live_section == 2
+                      else 0)
                 left = max(0, per_cell - c["trials"]) if per_cell else 0
                 eta = left * c["dur_s"]
-                self._put(y, 1, f"{c['tag'][:23]:<24}")
+                self._put(y, 1, f"{c['tag'][:23]:<24}", hl)
                 self._put(y, 25, f"{c['trials']:>6}", C.A_DIM)
                 self._put(y, 31, f"{c['ungradeable']:>5}",
                           C.color_pair(3) if c["ungradeable"] else C.A_DIM)
