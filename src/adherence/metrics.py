@@ -184,7 +184,7 @@ def tool_calls(transcript) -> int:
 
 
 def abandoned(transcript, expects_edit: bool = True,
-              completed: bool = True) -> bool:
+              completed: bool = True, observed_edits: int = -1) -> bool:
     """Design §5 control 3: flag trials that terminate with fewer than 2
     tool calls, or with no edit where an edit was the job. An arm whose
     token advantage comes from giving up sooner has to be caught here,
@@ -208,6 +208,15 @@ def abandoned(transcript, expects_edit: bool = True,
         return True
     if not expects_edit:
         return False
+    # `observed_edits` is git's answer, and git outranks the transcript
+    # here. EDIT events are emitted only for tools that name a file in
+    # their input; an agent that writes through the shell -- a heredoc,
+    # `sed -i` -- changes files that git sees and the transcript does not.
+    # Measured: a trial with 26 calls, 35 tool calls and every check
+    # passing was flagged as having given up, because it did its editing
+    # in bash. -1 means nobody looked, so fall back to the transcript.
+    if observed_edits >= 0:
+        return observed_edits == 0
     return not any(e.get("type") == schema.EDIT for e in transcript)
 
 
@@ -226,7 +235,8 @@ def turns_until_first_compaction(transcript) -> int | None:
 
 
 def compute(transcript, floor: int = 0, duration_s: float | None = None,
-            expects_edit: bool = True, completed: bool = True) -> dict:
+            expects_edit: bool = True, completed: bool = True,
+            observed_edits: int = -1) -> dict:
     """All per-run cost metrics.
 
     `floor` is the per-arm harness floor from E5's calibration: the input
@@ -280,7 +290,13 @@ def compute(transcript, floor: int = 0, duration_s: float | None = None,
         "compactions": sum(1 for e in transcript
                            if e.get("type") == schema.COMPACTION),
         "turns_until_first_compaction": turns_until_first_compaction(transcript),
-        "abandoned": abandoned(transcript, expects_edit, completed),
+        "abandoned": abandoned(transcript, expects_edit, completed,
+                               observed_edits),
+        # What git saw, beside what the transcript claims. A gap between
+        # them means the agent edited through a tool the stream does not
+        # mark as an edit, which silently empties first_edit, probe_trail
+        # and every routing metric built on them.
+        "observed_edits": observed_edits,
         # §7: total_tokens is the only figure quotable as a saving;
         # per-agent numbers are diagnostics. Both are reported, and the
         # total leads.

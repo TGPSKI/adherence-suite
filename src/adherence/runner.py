@@ -833,7 +833,9 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
                                     meta.get("expects_edit", 1))),
                                 # A trial the harness stopped cannot be
                                 # said to have given up.
-                                completed=adapter_ok),
+                                completed=adapter_ok,
+                                observed_edits=len(
+                                    gradelib.git_changed_files(sandbox))),
         provenance=provenance(scen_dir, meta, arm, arms_dir, adapter, harness),
         fixture=str(meta.get("fixture", "")),
         purpose=purpose,

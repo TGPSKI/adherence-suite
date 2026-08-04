@@ -963,6 +963,45 @@ def check_cli_grader() -> list[str]:
     return problems
 
 
+def check_abandoned() -> list[str]:
+    """`abandoned` must mean the agent gave up, and nothing else.
+
+    Two ways it lied. It fired on a trial the HARNESS killed -- a 45-minute
+    run cut off at its ceiling with 27 MB of events was recorded as having
+    given up, the opposite of what happened. And it fired on a trial that
+    edited through the shell: EDIT events exist only for tools naming a
+    file in their input, so an agent using a heredoc or `sed -i` changes
+    files git can see and the transcript cannot. Measured on a trial with
+    26 calls, 35 tool calls and every check passing."""
+    problems = []
+    t = [schema.capability(task_events=True)] + [
+        schema.command("sed -i s/a/b/ f.go") for _ in range(5)]
+
+    cases = [
+        ("harness killed it", dict(completed=False), False),
+        ("edited via the shell, git saw 3",
+         dict(completed=True, observed_edits=3), False),
+        ("touched nothing, git agrees",
+         dict(completed=True, observed_edits=0), True),
+        ("no git answer, fall back to the transcript",
+         dict(completed=True, observed_edits=-1), True),
+    ]
+    for label, kw, want in cases:
+        got = metrics.abandoned(t, True, **kw)
+        if got is not want:
+            problems.append(f"{label}: abandoned={got}, expected {want}")
+
+    # A real give-up still has to be caught, or the flag is useless.
+    quit_early = [schema.capability(task_events=True),
+                  schema.probe("read", "a.go", 10)]
+    if not metrics.abandoned(quit_early, True, completed=True,
+                             observed_edits=0):
+        problems.append("a trial that made one probe and stopped was not "
+                        "flagged; an arm whose token advantage comes from "
+                        "giving up sooner has to be caught here")
+    return problems
+
+
 def check_analysis() -> list[str]:
     """The pre-specified analysis (docs/EVAL.md) must detect a planted
     effect, stay silent when there is none, and REFUSE when a precondition
@@ -1077,6 +1116,7 @@ CHECKS = (
     ("process hygiene", check_process_hygiene),
     ("live cursor anchoring", check_cursor_anchoring),
     ("cli grader verdicts", check_cli_grader),
+    ("abandoned means gave up", check_abandoned),
     ("proxy attribution under concurrency", check_proxy_attribution),
     ("pre-specified analysis", check_analysis),
     ("stdlib test runner", check_test_runner),
