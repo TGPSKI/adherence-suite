@@ -437,6 +437,68 @@ ergonomic claims — deterministic validation, drift detection, `CODEOWNERS`
 alignment — none of which need an eval. Saying so plainly beats a contested
 benchmark.
 
+## Amendment 1 — task supply and the grading protocol
+
+Recorded 2026-08-04, **before any data**, against the frozen v1 tag. Both
+items are feasibility and specification, not hypotheses or analysis; nothing
+in the registered claims, thresholds, or procedure changes.
+
+### The usable task supply is 32, not 174
+
+The E1 screen counted merged PRs mechanically. Classifying all 174
+post-cutoff merges by what they actually change:
+
+| bucket | n | share |
+|---|---|---|
+| CI / agent-config (`.github/`, workflows, skill files) | 83 | 47.7% |
+| dependency bumps | 42 | 24.1% |
+| **Go change with its own tests** | **32** | **18.4%** |
+| Go change, no tests | 13 | 7.5% |
+| docs / other | 4 | 2.3% |
+
+Nearly half of this repository's recent history is agentic-workflow
+configuration — which is a fact about `cli/cli` in 2026, not a defect, but it
+means the screen overstated usable supply by roughly 5×.
+
+Size-banding the 32 against the calibration gate:
+
+| band | n | expected gate outcome |
+|---|---|---|
+| trivial, <20 added lines | 3 | ceilings at 1.00, dropped |
+| small, 20–120 | 11 | plausibly in [0.25, 0.80] |
+| medium, 120–400 | 8 | plausible, harder |
+| large, >400 | 10 | floors at 0.00, dropped |
+
+**~19 plausible candidates against a registered target of ~10 kept.** The
+protocol expects to discard half or more at the gate, so this lands on target
+with no margin. The registered stopping rule already covers the downside:
+fewer than 6 usable scenarios means reporting that, not relaxing the band.
+
+Consequence for sampling: the registered "sample ~40" is not available for
+this fixture. **All 32 gradeable candidates enter the pilot**, which removes
+sampling discretion entirely — a strengthening, not a relaxation, since there
+is no longer a choice of which PRs to include.
+
+### The grading protocol needed pinning
+
+"Correctness = the PR's own tests" was ambiguous between two protocols, and
+the difference decides what is being measured:
+
+| Reading | What it measures |
+|---|---|
+| the agent must also write the tests | test-authoring ability, confounded with the fix |
+| **the harness applies the PR's test files, then runs them** | whether the fix is correct |
+
+**Registered: the second.** For each task the harness checks out the parent
+commit, applies *only* the PR's `_test.go` changes, and runs the affected
+packages. The agent never sees the tests and is not asked to write them. A
+task qualifies only if those tests fail before the change and pass after it —
+verified mechanically per task during E6, and any task failing that check is
+dropped with the reason logged.
+
+This was underspecified in v1. Pinning it now, before data, is the point of
+saying so here rather than deciding it when the first results look wrong.
+
 ## Known gaps
 
 - **E5 is not testable locally.** vLLM returns `prompt_tokens_details: null`, so
