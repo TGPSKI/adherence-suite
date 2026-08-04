@@ -55,7 +55,15 @@ echo "ecosystem: $KIND"
 case "$KIND" in
   go)     export GOMODCACHE="$CACHE/gomod" GOFLAGS=-mod=mod
           mkdir -p "$GOMODCACHE"
-          ( cd "$WARM" && go mod download all ) ;;
+          # `go mod download all` resolves the module graph but does not
+          # guarantee every package *builds*: indirect and test-only deps
+          # of deps can still be missing, and they only surface as
+          # "module lookup disabled by GOPROXY=off" later, under the
+          # namespace, where it reads as a broken fixture rather than a
+          # cold cache. Compile everything now, while the network is up.
+          ( cd "$WARM" && go mod download all \
+              && go build ./... \
+              && go test -run '^$' ./... >/dev/null ) ;;
   rust)   export CARGO_HOME="$CACHE/cargo"
           mkdir -p "$CARGO_HOME"
           ( cd "$WARM" && cargo fetch ) ;;

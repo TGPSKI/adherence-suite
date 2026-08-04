@@ -87,6 +87,27 @@ def packages_for(paths: list[str]) -> list[str]:
     return [f"./{d}/..." for d in dirs if d and d != "."]
 
 
+def warm_at(d: str, env: dict) -> None:
+    """Populate the shared module cache for THIS commit, with network.
+
+    Measured on cli/cli: 125 lines of go.mod/go.sum drift between HEAD and
+    a base three months earlier. A cache warmed at one commit does not
+    serve tasks at another, and the shortfall surfaces later as
+    "module lookup disabled by GOPROXY=off" — which reads as a broken
+    task rather than a cold cache, and silently deletes usable tasks from
+    the eval.
+
+    Warm with network here, once per commit. The cache is shared, so
+    overlapping dependency sets are downloaded once across the whole task
+    set. The agent's own runs stay offline; this is setup, not measurement.
+    """
+    online = {k: v for k, v in env.items()
+              if k not in ("GOPROXY", "GOFLAGS", "GOTOOLCHAIN")}
+    online["GOFLAGS"] = "-mod=mod"
+    subprocess.run(["go", "mod", "download", "all"], cwd=d, env=online,
+                   capture_output=True, text=True, timeout=1800)
+
+
 def verify(mirror: Path, parent: str, merge: str, test_files: list[str],
            pkgs: list[str], env: dict) -> tuple[bool, str]:
     """Fail-before / pass-after, without a model.
@@ -100,14 +121,18 @@ def verify(mirror: Path, parent: str, merge: str, test_files: list[str],
             sh(["git", "clone", "--local", "--shared", "--quiet",
                 "--no-checkout", str(mirror), d])
             sh(["git", "checkout", "--detach", "--quiet", parent], cwd=d)
+            # Dependencies for THIS commit, before anything runs offline.
+            warm_at(d, env)
             # the PR's tests, on the pre-fix tree
             sh(["git", "checkout", merge, "--"] + test_files, cwd=d)
             red = subprocess.run(["go", "test", *pkgs], cwd=d, env=env,
                                  capture_output=True, text=True, timeout=900)
             if red.returncode == 0:
                 return False, "tests already pass at the parent commit"
-            # now the real fix as well
+            # now the real fix as well -- and its own dependency state,
+            # since the merge commit may move go.mod
             sh(["git", "checkout", merge, "--", "."], cwd=d)
+            warm_at(d, env)
             green = subprocess.run(["go", "test", *pkgs], cwd=d, env=env,
                                    capture_output=True, text=True, timeout=900)
             if green.returncode != 0:
