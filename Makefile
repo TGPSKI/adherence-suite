@@ -47,7 +47,10 @@ help:
 		'  make mkscenarios TASKS= MIRROR= FIXTURE=  tasks -> runnable scenarios' \
 		'  make trees MIRROR= BASE= ARMSDIR=  each arm as a folder, to read and diff' \
 		'  make probe                 difficulty probe: A1 only, no generation' \
-		'                             [JOBS=4 TIMEOUT=900 ONLY=a,b PROBE_TRIALS=5]' \
+		'                             [JOBS=4 ONLY=a,b PROBE_TRIALS=5]' \
+		'                             TIMEOUT= ceiling on total wall time;' \
+		'                             IDLE= seconds with no stream activity' \
+		'                             (that is the one that means stuck)' \
 		'' \
 		'variables:' \
 		'  MODEL    <provider>/<model>; provider is a key in bench/opencode-bench.json' \
@@ -155,6 +158,7 @@ probe:
 		--arm $(PROBE_ARM) --out $(PROBE_OUT) \
 		$(if $(ARMSDIR),--arms-dir $(ARMSDIR),) \
 		$(if $(JOBS),--jobs $(JOBS),) $(if $(TIMEOUT),--timeout $(TIMEOUT),) \
+		$(if $(IDLE),--idle-timeout $(IDLE),) \
 		$(if $(ONLY),--only $(ONLY),)
 	@$(PY) -m adherence.probe $(PROBE_OUT)
 
