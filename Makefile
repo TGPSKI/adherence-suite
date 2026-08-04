@@ -16,7 +16,7 @@ RUNNER   = $(PYTHON) -m adherence.runner --adapter $(ADAPTER) --model $(MODEL) \
              --trials $(TRIALS) $(ARMFLAGS) --out $(OUT)
 
 .PHONY: help check ci-local compile selftest schema lint table matrix report \
-	analyze floors calibrate screen mkpr mkscenarios trees probe run all clean
+	analyze floors live calibrate screen mkpr mkscenarios trees probe run all clean
 
 help:
 	@printf '%s\n' \
@@ -28,6 +28,7 @@ help:
 		'  make ci-local [JOB=lint]   run CI'"'"'s own steps locally, from the workflow file' \
 		'' \
 		'viewing — read-only, never spends a GPU-second:' \
+		'  make live                  what is running right now, one-shot' \
 		'  make table [FILTER=a3/*]   one-shot snapshot (NOCOLOR=1 to strip ANSI)' \
 		'  make matrix [FILTER=a3/*]  interactive results matrix' \
 		'                             FILES= scopes to one run (default: all of' \
@@ -79,6 +80,9 @@ lint:
 	ruff check .
 
 # --- viewing ---
+
+live:
+	@$(PY) -m adherence.live
 
 table:
 	@FILTER="$(FILTER)" REF="$(REF)" PROXY="$(PROXY)" FILES="$(FILES)" \

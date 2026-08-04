@@ -32,6 +32,11 @@ from adherence import REPO_ROOT, gradelib, metrics, schema
 
 ROOT = REPO_ROOT
 
+# Written into every out-dir at run start so a trial in flight can say what
+# it is. Read by adherence.live; nothing in the measurement path depends
+# on it, so a viewer can never perturb a run.
+RUN_MARKER = ".adh-run.json"
+
 
 def load_yamlish(path: Path) -> dict:
     """Minimal YAML subset loader (flat keys, str/int values, one-level
@@ -283,19 +288,34 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
     sandbox = Path(tempfile.mkdtemp(prefix=f"adh-{scen_dir.name}-"))
     out_dir = Path(tempfile.mkdtemp(prefix=f"adh-out-{scen_dir.name}-"))
 
+    # Declare the run before doing any of it. Sandbox and out-dir get
+    # independent random suffixes, and neither name carries the arm or the
+    # trial -- so until this file exists a run in flight is anonymous, and
+    # a viewer can see that *something* is happening but not what. Written
+    # first, so it covers a run that dies during setup.
+    (out_dir / RUN_MARKER).write_text(json.dumps({
+        "scenario": scen_dir.name, "arm": arm, "trial": trial,
+        "model": model, "adapter": adapter.name,
+        "sandbox": str(sandbox), "pid": os.getpid(),
+        "timeout": int(timeout_override or meta.get("timeout", 1800)),
+        "started_at": datetime.now(timezone.utc)
+                          .replace(microsecond=0).isoformat(),
+    }, indent=2) + "\n")
+
     materialize(scen_dir, sandbox, meta)
-    # PR-derived scenarios ship a task record the grader needs and the
-    # agent must not have: test files, the merge commit, the test command.
-    # It lands before the baseline commit so it is tracked-and-clean and
-    # never shows up as an agent edit, and it names no source path the
-    # prompt withheld.
-    task_json = scen_dir / "task.json"
-    if task_json.is_file():
-        (sandbox / ".adh-task.json").write_text(task_json.read_text())
     # Per-fixture ignore set, installed before anything can dirty the
     # tree. `ignore:` in scenario.yaml lists whatever this repo's own
     # test run writes and its .gitignore misses (H9).
     gradelib.write_harness_excludes(sandbox, meta.get("ignore", []))
+    # PR-derived scenarios ship a task record the grader needs and the
+    # agent must not have: test files, the merge commit, the test command.
+    # Written AFTER the excludes so it is ignored rather than committed:
+    # the runner rewrites it once the agent stops, and a tracked file that
+    # the harness modifies is a file the grader will attribute to the
+    # agent. It names no source path the prompt withheld.
+    task_json = scen_dir / "task.json"
+    if task_json.is_file():
+        (sandbox / ".adh-task.json").write_text(task_json.read_text())
     require_arms_dir(scen_dir, meta, arm, arms_dir)
     apply_arm(sandbox, arms_dir, arm)
     # Baseline commit LAST, after the arm overlay is in place. Committing

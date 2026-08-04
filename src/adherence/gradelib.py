@@ -198,7 +198,16 @@ def file_contains(sandbox: Path, rel: str, pattern: str) -> bool:
 # present in a real sandbox where the model's actual changes were
 # in-scope but the check still failed on these -- a false positive, not
 # a real scope violation.
-HARNESS_EXCLUDES = ("opencode.json", "__pycache__/", ".pytest_cache/")
+HARNESS_EXCLUDES = ("opencode.json", "__pycache__/", ".pytest_cache/",
+                    # The runner's own task record. It used to be committed
+                    # into the baseline so it would read as tracked-and-
+                    # clean, but the runner rewrites it after the agent
+                    # stops (to hand derived metrics to the grader) -- which
+                    # turned it into a MODIFIED tracked file, and
+                    # git_changed_files then reported the harness's own
+                    # write as an agent edit. Observed live: "agent touched
+                    # ['.adh-task.json']" on a run that touched nothing.
+                    ".adh-task.json")
 
 _MARK = "# adherence-suite: harness noise"
 

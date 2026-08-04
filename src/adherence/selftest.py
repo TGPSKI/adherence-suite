@@ -374,6 +374,14 @@ def check_noise_filter() -> list[str]:
                        "commit -qm base --allow-empty",
                        shell=True, cwd=sb, check=True, capture_output=True)
 
+        # The runner's own task record, which it rewrites after the agent
+        # stops to hand derived metrics to the grader. It used to be
+        # committed into the baseline, so that rewrite turned it into a
+        # modified tracked file and the grader reported the harness's write
+        # as an agent edit -- observed live as "agent touched
+        # ['.adh-task.json']" on a run that touched nothing.
+        write(sb, ".adh-task.json", '{"pr": 1, "_metrics": {"calls": 9}}')
+
         # Exactly what a test run leaves behind. No agent edits at all.
         write(sb, "opencode.json", "{}")
         write(sb, "__pycache__/mathlib.cpython-313.pyc", "x")
@@ -544,6 +552,99 @@ def check_harness_exclusion() -> list[str]:
     return problems
 
 
+def check_live() -> list[str]:
+    """The live view reads a stream being written by another process.
+
+    Two ways it can lie. It can mis-parse: the counters live under
+    `part`, and reading them from the top level -- as the first cut did --
+    yields a confident zero for every token, which looks like a cheap run
+    rather than a broken reader. And it can guess: a run whose marker is
+    missing has no arm, and inventing one would put a wrong label on the
+    thing the whole eval is comparing.
+
+    It must also never raise. The last line of a live NDJSON file is
+    routinely half-written, and a viewer that dies on it is a viewer that
+    dies exactly when a run is at its most interesting."""
+    import json as _json
+    import os as _os
+    import tempfile
+    from pathlib import Path as _P
+
+    from adherence import live as lv
+    problems = []
+
+    def ev(**kw):
+        return _json.dumps(kw)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        d = _P(tmp) / "adh-out-cli-cli-13057-abcdef"
+        d.mkdir()
+        stream = [
+            ev(type="step_finish", timestamp=1000, sessionID="root",
+               part={"tokens": {"input": 11000, "output": 120,
+                                "cache": {"read": 7, "write": 9}}}),
+            ev(type="tool_use", timestamp=1100, sessionID="root",
+               part={"tool": "read", "state": {"input": {"filePath": "a.go"}}}),
+            ev(type="tool_use", timestamp=1200, sessionID="root",
+               part={"tool": "task", "state": {"input": {
+                   "description": "Explore the issue commands"}}}),
+            ev(type="step_finish", timestamp=1300, sessionID="child",
+               part={"tokens": {"input": 500, "output": 10}}),
+            ev(type="text", timestamp=1400, sessionID="root",
+               part={"text": "Now editing the file"}),
+            '{"type": "step_finish", "part": {"tok',   # half-written line
+        ]
+        (d / "stdout.txt").write_text("\n".join(stream) + "\n")
+
+        st = lv._stream(d / "stdout.txt")
+        if st["tok_in"] != 11500:
+            problems.append(
+                f"tok_in {st['tok_in']}, expected 11500. The counters are "
+                f"nested under `part`; reading the top level returns 0 for "
+                f"every run, which reads as a cheap run, not a broken reader")
+        if st["calls"] != 2 or st["tools"] != 2:
+            problems.append(f"calls={st['calls']} tools={st['tools']}; "
+                            f"expected 2 and 2")
+        if st["cache_read"] != 7 or st["cache_write"] != 9:
+            problems.append(f"cache {st['cache_read']}/{st['cache_write']}; "
+                            f"expected 7/9")
+        if st["sessions"] != 2 or st["subagent_calls"] != 1:
+            problems.append(f"sessions={st['sessions']} "
+                            f"subagent_calls={st['subagent_calls']}; a second "
+                            f"sessionID is a dispatched subagent")
+        if not st["spawns"]:
+            problems.append("a `task` tool call is a subagent spawn and was "
+                            "not recorded")
+        if st["partial_lines"] != 1:
+            problems.append(f"partial_lines={st['partial_lines']}; the "
+                            f"half-written last line must be counted, not "
+                            f"raised")
+
+        # No marker: scenario is recoverable from the path, arm is not.
+        runs = lv.snapshot(tmp=tmp)
+        if len(runs) != 1:
+            problems.append(f"snapshot found {len(runs)} run(s); expected 1")
+        elif runs[0]["arm"] != "?" or not runs[0]["unlabelled"]:
+            problems.append(f"arm reported as {runs[0]['arm']!r} for a run "
+                            f"with no marker; it must be unknown, never "
+                            f"guessed")
+        elif runs[0]["budget"] is not None:
+            problems.append("budget reported without a known timeout; the "
+                            "runner's --timeout overrides scenario.yaml, so "
+                            "a substituted value overstates what is left")
+
+        # With a marker, the label is real.
+        (d / lv.RUN_MARKER).write_text(_json.dumps({
+            "scenario": "cli-cli-13057", "arm": "a3", "trial": 2,
+            "pid": _os.getpid(), "timeout": 900}))
+        runs = lv.snapshot(tmp=tmp)
+        if not runs or runs[0]["arm"] != "a3" or runs[0]["trial"] != 2:
+            problems.append("a marked run did not report its own arm/trial")
+        elif runs[0]["budget"] is None:
+            problems.append("budget not computed despite a known timeout")
+    return problems
+
+
 def check_analysis() -> list[str]:
     """The pre-specified analysis (docs/EVAL.md) must detect a planted
     effect, stay silent when there is none, and REFUSE when a precondition
@@ -654,6 +755,7 @@ def check_analysis() -> list[str]:
 CHECKS = (
     ("validation/experiment isolation", check_purpose_isolation),
     ("harness fault is not a model failure", check_harness_exclusion),
+    ("live run reader", check_live),
     ("pre-specified analysis", check_analysis),
     ("stdlib test runner", check_test_runner),
     ("fixture noise filter", check_noise_filter),

@@ -25,11 +25,13 @@ import os
 import sys
 import time
 
+from adherence import live as lv
 from adherence import suitedata as sd
 from adherence.tui.framework import TuiApp, curses_main
 
-VIEWS = ("cells", "arms", "cost", "calib")
+VIEWS = ("live", "cells", "arms", "cost", "calib")
 VIEW_HELP = {
+    "live": "runs in flight, read off their streams — [space] opens detail",
     "cells": "every (arm, scenario) cell — [space] opens detail",
     "arms": "per-arm rollup; ratios are paired on scenario, geometric",
     "cost": "pass rate vs tokens — ★ is the Pareto frontier (§5)",
@@ -60,6 +62,8 @@ class SuiteTui(TuiApp):
         self.detail = False
         self.cells = []
         self.rows = []
+        self.live = []
+        self.live_cursor = 0
         self.proxy_rows = []
         self.stamp = 0.0
         self.seen_mtime = 0.0
@@ -67,7 +71,11 @@ class SuiteTui(TuiApp):
         # The picker narrows an existing dataset. With nothing loaded yet --
         # a run that just started -- it is an empty box over the one thing
         # worth seeing, which is the progress bar.
-        self.picking = not pattern and bool(self.cells)
+        self.reload_live()
+        # Open on whatever there is to see: if something is running, that is
+        # the news; otherwise the results are.
+        self.view = 0 if self.live else VIEWS.index("cells")
+        self.picking = not pattern and bool(self.cells) and not self.live
         self.pick_i = 0
         self.reload()
         self.curses.halfdelay(20)     # 2s tick, so a running battery shows up
@@ -81,6 +89,16 @@ class SuiteTui(TuiApp):
                            if self.proxy_path else [])
         self.stamp = time.time()
         self.seen_mtime = sd.newest_mtime(self.files)
+
+    def reload_live(self):
+        """Separate from reload(): in-flight state changes every second and
+        has no mtime to gate on, while re-parsing every results file on a 2s
+        tick would be wasteful. Failures are swallowed -- a viewer must not
+        die because a run cleaned up its directory mid-read."""
+        try:
+            self.live = lv.snapshot()
+        except Exception:
+            self.live = []
 
     def visible(self):
         cs = [c for c in self.cells if sd.matches(c["tag"], self.pattern)]
@@ -138,7 +156,10 @@ class SuiteTui(TuiApp):
 
     def footer(self, max_y, max_x, total, avail):
         C = self.curses
-        keys = [("[tab] view", C.A_DIM), ("[s] sort", C.A_DIM),
+        n_live = sum(1 for r in self.live if r["state"] == "running")
+        keys = [("[tab] view", C.A_DIM),
+                (f"[L] live·{n_live}", C.color_pair(2) if n_live else C.A_DIM),
+                ("[s] sort", C.A_DIM),
                 ("[/] filter", C.A_DIM), ("[F] clear", C.A_DIM),
                 ("[p] pick", C.A_DIM), ("[space] detail", C.A_DIM),
                 ("[r] reload", C.A_DIM), ("[q] quit", C.A_DIM)]
@@ -162,6 +183,20 @@ class SuiteTui(TuiApp):
         cs = self.visible()
         total = avail = 0
         v = VIEWS[self.view]
+        if v == "live":
+            # Deliberately not filtered by `pattern`: that filter is a
+            # results-side idea (arm/scenario cells), and silently hiding a
+            # running job because of it would be the worst possible
+            # behaviour for a monitor.
+            if self.detail and self.live:
+                self.live_cursor = max(0, min(self.live_cursor,
+                                              len(self.live) - 1))
+                self.view_live_detail(self.live[self.live_cursor],
+                                      max_y, max_x)
+            else:
+                total, avail = self.view_live(body, max_x)
+            self.footer(max_y, max_x, total, avail)
+            return
         if not cs and v != "calib":
             # Nothing on screen has two very different causes, and blaming
             # the filter when the run simply has not written a result yet
@@ -185,6 +220,136 @@ class SuiteTui(TuiApp):
         elif v == "calib":
             total, avail = self.view_calib(body, max_x)
         self.footer(max_y, max_x, total, avail)
+
+    STATE_COLOR = {"running": 2, "grading": 5, "stalled": 4, "dead": 4}
+
+    def view_live(self, body, max_x):
+        C = self.curses
+        runs = self.live
+        if not runs:
+            self._put(3, 3, "nothing in flight — start a run, or [tab] to "
+                            "the results views", C.A_DIM)
+            return 0, 0
+        s = lv.summarize(runs)
+        self._put(3, 1, f"{s['running']} running · {s['grading']} grading · "
+                        f"{s['stalled']} stalled · {s['calls']} calls · "
+                        f"{s['tok_in']:,} input tokens", C.A_BOLD)
+        self._put(4, 1, f"{'scenario':<20}{'arm':>4}{'t':>3}{'state':>9}"
+                        f"{'calls':>7}{'tools':>7}{'sub':>5}{'tok_in':>12}"
+                        f"{'elapsed':>9}{'budget':>8}  doing", C.A_DIM)
+        avail = max(1, body - 3)
+        self.live_cursor = max(0, min(self.live_cursor, len(runs) - 1))
+        for i, r in enumerate(runs[:avail]):
+            y = 5 + i
+            base = C.color_pair(5) if i == self.live_cursor else 0
+            self._put(y, 1, f"{r['scenario'][:19]:<20}", base)
+            self._put(y, 21, f"{r['arm']:>4}", C.A_DIM if r["unlabelled"]
+                      else 0)
+            self._put(y, 25, f"{r['trial'] if r['trial'] >= 0 else '?':>3}",
+                      C.A_DIM)
+            self._put(y, 28, f"{r['state']:>9}",
+                      C.color_pair(self.STATE_COLOR.get(r["state"], 0)))
+            self._put(y, 37, f"{r['calls']:>7}", 0)
+            self._put(y, 44, f"{r['tools']:>7}", C.A_DIM)
+            self._put(y, 51, f"{r['sessions'] - 1 if r['sessions'] else 0:>5}",
+                      C.A_DIM)
+            self._put(y, 56, f"{r['tok_in']:>12,}", C.color_pair(2))
+            self._put(y, 68, f"{lv.fmt_age(r['elapsed_s']):>9}", C.A_DIM)
+            # Red once the run is close enough to its timeout that it is
+            # probably going to be killed rather than finish.
+            b = r["budget"]
+            self._put(y, 77, f"{lv.fmt_budget(b):>8}",
+                      C.color_pair(4) if b and b > 0.8 else C.A_DIM)
+            self._put(y, 87, r["last_tool"][:max(0, max_x - 89)], C.A_DIM)
+        return len(runs), avail
+
+    def view_live_detail(self, r, max_y, max_x):
+        C = self.curses
+        w = max_x - 4
+        y = 3
+
+        def line(label, value, attr=0):
+            nonlocal y
+            if y >= max_y - 2:
+                return
+            self._put(y, 1, f"{label:<16}", C.A_DIM)
+            self._put(y, 18, str(value)[:max(0, w - 18)], attr)
+            y += 1
+
+        def wrapped(label, text, limit=6):
+            nonlocal y
+            self._put(y, 1, f"{label:<16}", C.A_DIM)
+            words, cur, out = str(text).split(), "", []
+            for word in words:
+                if len(cur) + len(word) + 1 > w - 18:
+                    out.append(cur)
+                    cur = word
+                else:
+                    cur = f"{cur} {word}".strip()
+            if cur:
+                out.append(cur)
+            for ln in out[:limit]:
+                if y >= max_y - 2:
+                    return
+                self._put(y, 18, ln, 0)
+                y += 1
+            if len(out) > limit and y < max_y - 2:
+                self._put(y, 18, f"… {len(out) - limit} more line(s)", C.A_DIM)
+                y += 1
+
+        info = r["info"]
+        line("scenario", r["scenario"], C.A_BOLD)
+        line("arm / trial", f"{r['arm']} / "
+                            f"{r['trial'] if r['trial'] >= 0 else '?'}"
+                            + ("   (started before the runner wrote its "
+                               "marker; not guessed)" if r["unlabelled"]
+                               else ""),
+             C.A_DIM if r["unlabelled"] else 0)
+        line("state", f"{r['state']}   elapsed {lv.fmt_age(r['elapsed_s'])}"
+                      f"   budget {lv.fmt_budget(r['budget'])}"
+                      f"   idle {lv.fmt_age(r['idle_s'])}",
+             C.color_pair(self.STATE_COLOR.get(r["state"], 0)))
+        line("cost so far", f"{r['calls']} calls · {r['tok_in']:,} in · "
+                            f"{r['tok_out']:,} out · cache "
+                            f"{r['cache_read']:,}r/{r['cache_write']:,}w")
+        if r["sessions"] > 1:
+            line("subagents", f"{r['sessions'] - 1} session(s), "
+                              f"{r['subagent_calls']} of the calls above")
+        if info.get("pr"):
+            line("source PR", f"#{info['pr']}   base "
+                              f"{info.get('base_commit', '')[:12]}")
+        y += 1
+
+        wrapped("task", info.get("prompt", "(no prompt recorded)"), limit=8)
+        y += 1
+
+        # What the grader will do when the agent stops. Shown while the run
+        # is live because it is the only way to judge, in the moment,
+        # whether the agent is working in the right place at all.
+        if info.get("code_files"):
+            line("PR touched", ", ".join(info["code_files"])[:w - 18])
+        if info.get("test_files"):
+            line("grades with", ", ".join(info["test_files"])[:w - 18])
+        if info.get("test_cmd"):
+            line("test cmd", info["test_cmd"])
+        y += 1
+
+        if r["tool_counts"]:
+            top = sorted(r["tool_counts"].items(), key=lambda kv: -kv[1])
+            line("tools used", "  ".join(f"{k}×{v}" for k, v in top[:8]))
+        if r["spawns"]:
+            line("spawned", f"{len(r['spawns'])} subagent task(s)")
+            for sp in r["spawns"][:3]:
+                line("", f"· {sp}", C.A_DIM)
+        y += 1
+        line("last tool", r["last_tool"] or "—")
+        wrapped("last message", r["last_text"] or "—", limit=4)
+        y += 1
+        line("sandbox", r["sandbox"] or "—", C.A_DIM)
+        line("out dir", r["out_dir"], C.A_DIM)
+        if r["partial_lines"]:
+            line("note", f"{r['partial_lines']} unparsed line(s) — normal "
+                         f"while the stream is being written", C.A_DIM)
 
     def view_cells(self, cs, body, max_x):
         C = self.curses
@@ -433,7 +598,10 @@ class SuiteTui(TuiApp):
     def handle_key(self, key) -> bool:
         C = self.curses
         if key == -1:                     # halfdelay tick
-            if sd.newest_mtime() > self.seen_mtime:
+            # Live state has no mtime to gate on and changes constantly, so
+            # it refreshes every tick; results only when a file moved.
+            self.reload_live()
+            if sd.newest_mtime(self.files) > self.seen_mtime:
                 self.reload()
             return False
         if self.editing:
@@ -486,14 +654,24 @@ class SuiteTui(TuiApp):
             self.picking, self.scroll, self.pick_i = True, 0, 0
         elif key == ord("r"):
             self.reload()
+            self.reload_live()
+        elif key == ord("L"):
+            self.view = VIEWS.index("live")
+            self.scroll = 0
         elif key == ord(" "):
             self.detail = not self.detail
         elif key in (ord("j"), C.KEY_DOWN):
-            self.cursor += 1
-            self.scroll += 1
+            if VIEWS[self.view] == "live":
+                self.live_cursor += 1
+            else:
+                self.cursor += 1
+                self.scroll += 1
         elif key in (ord("k"), C.KEY_UP):
-            self.cursor = max(0, self.cursor - 1)
-            self.scroll = max(0, self.scroll - 1)
+            if VIEWS[self.view] == "live":
+                self.live_cursor = max(0, self.live_cursor - 1)
+            else:
+                self.cursor = max(0, self.cursor - 1)
+                self.scroll = max(0, self.scroll - 1)
         elif key == C.KEY_NPAGE:
             self.scroll += 10
         elif key == C.KEY_PPAGE:
