@@ -103,6 +103,20 @@ def newest_mtime(paths=None):
 
 # ---------- cells ----------
 
+def _ungradeable(row) -> bool:
+    """Did the harness fail to produce something judgeable?
+
+    One definition, used by both the `ung` column and the pass rate, so a
+    row cannot be shown as ungradeable and simultaneously counted as a
+    failure in the rate beside it. Mirrors analyze.harness_excluded --
+    the registered analysis stays authoritative; this exists so the
+    viewer cannot disagree with it."""
+    if row.get("schema_errors"):
+        return True
+    return any(c.get("name") == "adapter" and c.get("status") != "pass"
+               for c in row.get("checks") or [])
+
+
 def _med(vals):
     vals = [v for v in vals if v is not None]
     return st.median(vals) if vals else 0
@@ -148,7 +162,22 @@ def load_cells(paths=None, pattern=None):
         won = [r for r in rs if r["all_pass"]]
         toks = [(r["metrics"] or {}).get("tok_in_billed", 0) for r in rs]
         calls = [(r["metrics"] or {}).get("calls", 0) for r in rs]
-        passes = [1.0 if r["all_pass"] else 0.0 for r in rs]
+        # Ungradeable rows are EXCLUDED from the rate, not counted against
+        # it. They carry all_pass=False because nothing graded them, so
+        # averaging over every row scores a harness fault as a model that
+        # got it wrong -- which the registration forbids in as many words
+        # ("Harness faults are not model failures", docs/EVAL.md).
+        #
+        # This disagreed with the registered analysis, which has always
+        # applied the exclusion. Measured on the 120-run validation grid:
+        # cli-cli-13057 hit the adapter's hard ceiling on 3 of 5 trials and
+        # read 40% here against 100% there -- and 40% is inside the
+        # calibration band while 100% is outside it, so the two surfaces
+        # disagreed about whether that scenario could discriminate at all.
+        # A viewer that can move a scenario in or out of band is not a
+        # display bug.
+        gradeable = [r for r in rs if not _ungradeable(r)]
+        passes = [1.0 if r["all_pass"] else 0.0 for r in gradeable]
         fails = sorted({c["name"] for r in rs for c in r["checks"]
                         if c["status"] == "fail"})
         cells.append({
@@ -207,10 +236,7 @@ def load_cells(paths=None, pattern=None):
                                  for r in rs]),
             "subagent_tok": _med([(r["metrics"] or {}).get("subagent_tok_in", 0)
                                   for r in rs]),
-            "ungradeable": sum(1 for r in rs
-                               if any(c.get("name") == "adapter"
-                                      and c.get("status") != "pass"
-                                      for c in r["checks"])),
+            "ungradeable": sum(1 for r in rs if _ungradeable(r)),
         })
     cells.sort(key=lambda c: (c["arm"], c["scenario"]))
     if pattern:
