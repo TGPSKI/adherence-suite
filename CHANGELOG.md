@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Pre-registration of the directed-contexts eval**, frozen at tag
+  `prereg/directed-contexts/v1`. `docs/EVAL.md` now fixes the primary
+  outcome, the reference arm, the power basis, the stopping rule, the
+  exclusion criteria, and a deviation-disclosure policy before any arm runs.
+- **`adherence.analyze`** — the analysis as committed code rather than a
+  description, so it cannot be tuned to the data. Emits a Holm-corrected
+  verdict per falsifier and reports **NOT TESTABLE** where a precondition is
+  missing, never "not tripped". `make analyze`.
+- `ruleset-prereg-tags-immutable.json` — `prereg/*` tags are immutable and
+  signature-required, which is what makes the registration mean anything.
+
 - `make ci-local` — extracts CI's own `run:` blocks from the workflow file and
   executes them under the shell GitHub uses. Added after two broken steps
   reached `main`: hand-copying a step into a terminal drops `set -euo

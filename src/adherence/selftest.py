@@ -10,13 +10,14 @@ standard it grades agents: observed behavior, both directions.
 """
 from __future__ import annotations
 
+import random
 import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from adherence import REPO_ROOT, gradelib, metrics, schema
+from adherence import REPO_ROOT, analyze, gradelib, metrics, schema
 from adherence.runner import load_grader
 
 ROOT = REPO_ROOT
@@ -402,8 +403,122 @@ def check_test_runner() -> list[str]:
     return problems
 
 
+def _synth(arm, scen, trial, tok, calls, passed, floor=9500):
+    """A result record with only the fields the analysis reads."""
+    return {"scenario": scen, "category": "synthetic", "model": "m",
+            "adapter": "a", "arm": arm, "trial": trial, "duration_s": 1.0,
+            "prompt_tokens": tok, "completion_tokens": 0,
+            "checks": [{"name": "x", "status": "pass" if passed else "fail",
+                        "evidence": ""}],
+            "all_pass": passed,
+            "metrics": {"calls": calls, "tok_in_billed": tok,
+                        "tok_in_marginal": tok - floor * calls,
+                        "tok_effective": tok, "floor_used": floor,
+                        "cache_read": 0, "cache_write": 0}}
+
+
+def check_analysis() -> list[str]:
+    """The pre-specified analysis (docs/EVAL.md) must detect a planted
+    effect, stay silent when there is none, and REFUSE when a precondition
+    is missing.
+
+    That last one is the point. A falsifier reported as 'not tripped' by a
+    test that never ran is worse than no result: it reads as evidence for
+    the treatment. This asserts the refusal explicitly."""
+    problems = []
+    rng = random.Random(7)
+
+    def dataset(ratio, floor=9500, passed=True, arms=("a1", "a2", "a3")):
+        rows = []
+        for i in range(10):
+            scen, base_calls = f"s{i:02d}", rng.randint(6, 20)
+            # billed sits above floor x calls, as a correctly measured
+            # floor guarantees: every call carries the floor plus context
+            base_tok = floor * base_calls * rng.uniform(1.6, 3.0) if floor \
+                else rng.uniform(60_000, 300_000)
+            for arm in arms:
+                mult = ratio if arm == "a3" else 1.0
+                for t in range(7):
+                    jitter = rng.gauss(1.0, 0.19)
+                    rows.append(_synth(arm, scen, t,
+                                       max(1000.0, base_tok * mult * jitter),
+                                       max(1, round(base_calls * mult)),
+                                       passed if arm == "a3" else True, floor))
+        return rows
+
+    # A real 40% reduction must trip nothing and be Holm-significant.
+    F = analyze.evaluate(dataset(0.60))
+    if F["F1"]["verdict"] != "not tripped":
+        problems.append(f"F1 on a planted 40% win: {F['F1']['verdict']} "
+                        f"({F['F1']['detail']})")
+    if not F["F1"]["holm_significant"]:
+        problems.append("F1 planted 40% win did not survive Holm")
+
+    # No effect at all must TRIP F1 — the claim is unsupported.
+    F = analyze.evaluate(dataset(1.00))
+    if F["F1"]["verdict"] != "TRIPPED":
+        problems.append(f"F1 with no effect present: {F['F1']['verdict']} "
+                        f"(should be TRIPPED)")
+
+    # A 15pp pass-rate drop must trip the guardrail.
+    F = analyze.evaluate(dataset(0.60, passed=False))
+    if F["F4"]["verdict"] != "TRIPPED":
+        problems.append(f"F4 with the treatment failing every trial: "
+                        f"{F['F4']['verdict']}")
+
+    # Preconditions: refuse, never substitute.
+    F = analyze.evaluate(dataset(0.60, floor=0))
+    if F["F1"]["verdict"] != "NOT TESTABLE":
+        problems.append("F1 ran without a measured floor — billed tokens "
+                        "must not silently substitute for marginal")
+    F = analyze.evaluate(dataset(0.60, arms=("a1", "a3")))
+    if F["F1"]["verdict"] != "NOT TESTABLE":
+        problems.append("F1 ran without the content-matched control arm")
+    base = analyze.evaluate(dataset(0.60))
+    for fid in ("F2", "F5", "F6"):
+        if base[fid]["verdict"] == "not tripped":
+            problems.append(f"{fid} reported 'not tripped' on data that "
+                            f"cannot test it")
+
+    # A mis-measured floor drives marginal non-positive. The analysis must
+    # refuse rather than analyse the biased survivors — this is the flaw the
+    # test caught on first run.
+    bad_floor = [dict(r, metrics=dict(r["metrics"],
+                                      tok_in_marginal=r["metrics"]["tok_in_billed"]
+                                      - 40_000 * r["metrics"]["calls"]))
+                 for r in dataset(0.60)]
+    if analyze.evaluate(bad_floor)["F1"]["verdict"] != "NOT TESTABLE":
+        problems.append("F1 analysed a set where most marginals are "
+                        "non-positive — a mis-measured floor must refuse")
+
+    # F5 needs >=2 fixtures. Inferring the fixture from the scenario id
+    # made every scenario its own fixture and F5 falsely readable.
+    if analyze.evaluate(dataset(0.60))["F5"]["verdict"] != "NOT TESTABLE":
+        problems.append("F5 was readable on single-fixture data")
+    two = [dict(r, fixture="f1") for r in dataset(0.60)] + \
+          [dict(r, fixture="f2", scenario="z" + r["scenario"])
+           for r in dataset(0.60)]
+    if analyze.evaluate(two)["F5"]["verdict"] == "NOT TESTABLE":
+        problems.append("F5 refused on two fixtures")
+
+    # Holm must not reject on a lone borderline p.
+    if analyze.holm({"F1": 0.04, "F3": 0.9, "F4": 0.9}).get("F3"):
+        problems.append("Holm rejected a p=0.9 test")
+    if not analyze.holm({"F1": 0.001}).get("F1"):
+        problems.append("Holm failed to reject a lone p=0.001")
+    return problems
+
+
 def main():
     failures = 0
+    analysis_problems = check_analysis()
+    print("OK  pre-specified analysis" if not analysis_problems
+          else "BAD pre-specified analysis")
+    for p in analysis_problems:
+        print(f"      {p}")
+    if analysis_problems:
+        failures += 1
+
     runner_problems = check_test_runner()
     print("OK  stdlib test runner" if not runner_problems
           else "BAD stdlib test runner")
@@ -443,7 +558,8 @@ def main():
                     print(f"      compliant tripped: {c.name}: {c.evidence}")
         if f:
             print(f"      violator evaded: {[c.name for c in fc]}")
-    n = len(ACTORS) + 3   # scenarios + cost metrics + noise filter + test runner
+    n = len(ACTORS) + 4   # scenarios + cost metrics + noise filter
+                          # + test runner + pre-specified analysis
     print(f"\nselftest: {n-failures}/{n} checks healthy")
     sys.exit(1 if failures else 0)
 

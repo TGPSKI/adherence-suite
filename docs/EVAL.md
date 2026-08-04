@@ -19,6 +19,21 @@ LSPs and MCPs — that question becomes arm A5. Participants are unnamed
 deliberately; the discussion was not public and the technical substance is what
 carries over.
 
+## Registration
+
+**Registered 2026-08-04** at tag `prereg/directed-contexts/v1`, on a repository
+whose committed ruleset makes `prereg/*` tags immutable and signature-required.
+Nothing below was written with results in hand, because there are none.
+
+What is frozen by that tag: the falsifiers and their thresholds, the primary
+outcome, the arm that serves as reference, the analysis procedure, the power
+basis, the stopping rule, and the exclusion criteria. The analysis itself is
+committed as code — `adherence.analyze` — and validated against synthetic data
+in `make selftest`, so the procedure cannot be tuned to the data later.
+
+Deviations are not forbidden; **undisclosed** deviations are. Any departure
+from this document gets stated in the results with what changed and why.
+
 ## Status
 
 The harness is built and both instrumentation gates pass. The experiment has
@@ -30,8 +45,47 @@ not run.
 | **Proxy-vs-adapter agreement** | **0.000%** over 20 runs, call counts 189/189 |
 | **Self-validation** | 16/16 with no model in the loop, negative direction proven |
 | **Arms A0–A5** | materialize from one source; A2 ≡ A3 asserted byte-for-byte |
-| **Fixture** | `cli/cli` vendored, builds and tests offline — [docs/FIXTURES.md](FIXTURES.md) |
+| **Fixture** | `cli/cli` — 2 of 4 gates cleared, see below |
 | **Context-set generation, PR sampling, the grid** | not started |
+
+## The fixture: cli/cli, with three caveats
+
+`cli/cli` is the registered fixture for the minimum viable version, pinned at
+`e83adbc0642994fae7c39a9a012eb34b8c81f4f1`. Two of its four gates are cleared
+and two are not:
+
+| Gate | State |
+|---|---|
+| screened against criteria fixed before screening | **cleared** — MIT, 174 post-cutoff PRs, 12 subsystems, ships `AGENTS.md` (so A1 is recovered, not authored) and `CODEOWNERS` |
+| hermetic offline build | **cleared** — 21 packages in 1.47 s, network namespace, cache read-only; materializes in 0.066 s with a clean `git status` at t=0 |
+| context set generated cold and frozen | not started |
+| PRs sampled, route ground truth frozen | not started |
+
+Three things about this choice are worth stating before results exist, because
+each of them is a reason the eval could come out uninformative:
+
+**It is one fixture, so E4 is out of reach.** Effect versus achieved *N* needs
+at least two repositories with different partitioning. One point has no slope.
+`adherence.analyze` reports F5 as NOT TESTABLE on a single fixture rather than
+letting it read as "no interaction found".
+
+**Popularity cuts against the contamination control.** Post-cutoff PRs are
+sampled precisely to avoid memorised solutions, and 174 is ample supply. But
+`cli/cli` is a heavily-starred Go repository, so the *codebase* is
+well-represented in training data even where a specific PR is not. Post-cutoff
+sampling limits memorised patches; it does not make the repository unfamiliar.
+The mutation pass exists for this, and if the pre/post split shows a large gap
+that is a finding about contamination, not a nuisance to correct away.
+
+**The floor risk is real and it is the biggest schedule risk here.** These are
+genuine Go PRs graded by the repository's own tests, run against a local 35B
+model. If pass rates floor near zero, the calibration gate drops nearly
+everything and there is no success-conditioned subset to compare cost on. The
+registered response is to report that outcome — "the model could not do enough
+of this repository's work to compare arms" is a real result about model
+capability — and **not** to widen the [0.25, 0.80] band until a grid appears.
+A second, easier fixture would be a new pre-registration, not a repair of this
+one.
 
 ## Claims
 
@@ -128,6 +182,85 @@ Per scenario × arm × trial, computed by `adherence.metrics` from `call` events
 | `per_agent` | parent vs each child, separately |
 | `abandoned` | gave up early |
 
+## The primary outcome
+
+One number, fixed now, so there is no menu to choose from later:
+
+> **The geometric mean of the per-scenario paired log-ratio of
+> `tok_in_marginal`, directed-inline (A3) against the content-matched
+> monolith (A2), among trials that passed the fixture's own tests.**
+
+Reference is **A2, not A1**. A win against the maintainer's own file cannot
+separate "bounding helps" from "you shipped fewer words", and the second is
+not a finding.
+
+Everything else — calls, billed tokens, probes, the A1 comparison, the
+unconditional versions — is secondary and reported, but does not decide E1.
+
+## Power
+
+Simulated from **measured** within-arm variance, not an assumed figure. On the
+20-run calibration set, token CV was 0.0-0.3% on 2-3 call scenarios and
+18.2-19.3% on 7- and 24-call scenarios. Token CV tracked call CV within about
+a point on three of four, so the variance is round-count variance and does not
+shrink with per-call care. PR-derived tasks are multi-round, so **19% is the
+planning value**.
+
+At 7 trials per cell, cluster-bootstrapped over scenarios:
+
+| true effect | k=6 | k=8 | k=10 | k=12 |
+|---|---|---|---|---|
+| 5% | 29% | 27% | 32% | 36% |
+| 10% | 62% | 71% | 77% | 83% |
+| 15% | 89% | 96% | **98%** | 99% |
+| 20% | 99% | 100% | **100%** | 100% |
+
+**At the target of 10 scenarios, a 15% difference is detected 98% of the time
+and the registered 20% threshold essentially always. A 5% difference is not
+detectable and will be reported as "underpowered for small effects" rather
+than as absence of an effect.**
+
+The simulation assumes the true effect is the same in every scenario. Real
+between-scenario heterogeneity would widen the interval, so these are optimistic
+and are stated as an upper bound on power, not a promise.
+
+## Stopping rule
+
+**Run the full pre-registered grid, then analyse once.** No looking at
+cross-arm results and deciding whether to continue — optional stopping is how
+a null becomes a finding.
+
+| Situation | Registered response |
+|---|---|
+| grid completes | analyse, report every cell |
+| a cell fails to execute (adapter, endpoint, infrastructure) | re-run that cell up to 3 times; if still failing, report as missing with the reason |
+| the calibration pilot yields fewer than 6 usable scenarios | **stop and report that**, do not relax the [0.25, 0.80] band to manufacture a grid |
+| results look bad partway | irrelevant; finish the grid |
+
+Interim looks at *harness health* (calibration gate, schema violations, crash
+rates) are allowed and expected. Interim looks at *arm comparisons* are not.
+
+## Exclusion criteria, fixed now
+
+A trial or scenario is excluded only for a reason on this list, and every
+exclusion is counted in the report:
+
+1. **Adapter failure** — the harness did not complete a run (`adapter` check
+   failed). Not a model result.
+2. **Schema violation** — the transcript failed validation, so its cost
+   figures are untrustworthy.
+3. **Calibration gate** — a scenario whose pooled pilot pass rate falls
+   outside [0.25, 0.80]. Dropped scenarios are logged and **never
+   re-authored to discriminate**.
+4. **Non-positive marginal tokens** — indicates the per-arm floor was
+   mis-measured. `adherence.analyze` refuses the whole comparison rather than
+   analysing survivors, because the survivors are biased toward high-token
+   scenarios.
+
+Not on the list, and therefore not permitted: excluding a trial for being an
+outlier, for a surprising result, or for a scenario turning out to favour the
+control.
+
 ## Statistical plan
 
 - **Paired on scenario.** Between-scenario token variance dwarfs between-arm
@@ -137,7 +270,14 @@ Per scenario × arm × trial, computed by `adherence.metrics` from `call` events
 - **Medians and IQR** beside means. Token spend is skewed.
 - **7 trials per cell**, justified by measured CV. A ~20% difference is
   detectable; ~5% is not, and that gets stated rather than glossed.
-- **Holm** across the six pre-registered tests. Report all cells.
+- **Holm** across the six pre-registered tests, implemented in
+  `adherence.analyze.holm`. Tests that could not run do not consume alpha and
+  are reported **NOT TESTABLE** — never as "not tripped", which reads as
+  evidence for the treatment.
+- **The analysis is code, not a description.** `python3 -m adherence.analyze
+  results.jsonl` emits the verdict table. `make selftest` proves it detects a
+  planted 40% effect, trips F1 when no effect exists, trips F4 on a 15pp
+  pass-rate drop, and refuses when the floor is missing or mis-measured.
 
 ## Confounds
 

@@ -1,0 +1,16 @@
+{
+  "name": "prereg-tags-immutable",
+  "target": "tag",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["refs/tags/prereg/**"],
+      "exclude": []
+    }
+  },
+  "rules": [
+    { "type": "update" },
+    { "type": "deletion" },
+    { "type": "required_signatures" }
+  ]
+}

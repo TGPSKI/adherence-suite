@@ -16,7 +16,7 @@ RUNNER   = $(PYTHON) -m adherence.runner --adapter $(ADAPTER) --model $(MODEL) \
              --trials $(TRIALS) $(ARMFLAGS) --out $(OUT)
 
 .PHONY: help check ci-local compile selftest schema lint table matrix report \
-	calibrate screen run all clean
+	analyze calibrate screen run all clean
 
 help:
 	@printf '%s\n' \
@@ -32,6 +32,7 @@ help:
 		'  make matrix [FILTER=a3/*]  interactive results matrix' \
 		'  make report [FILES=...]    publishable markdown scoreboard' \
 		'  make calibrate             proxy vs adapter agreement — the H4 gate' \
+		'  make analyze [FILES=...]   pre-specified falsifier verdicts (docs/EVAL.md)' \
 		'' \
 		'runs — these spend GPU time:' \
 		'  make run S=s05             one scenario' \
@@ -79,6 +80,9 @@ matrix:
 
 report:
 	$(PY) -m adherence.report --ref $(REF) $(or $(FILES),$(OUT))
+
+analyze:
+	$(PY) -m adherence.analyze $(or $(FILES),$(OUT))
 
 calibrate:
 	$(PY) -m adherence.calibrate $(or $(FILES),runs/cal-results.jsonl) \
