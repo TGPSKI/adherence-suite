@@ -129,6 +129,27 @@ def _fingerprint(body: dict) -> dict:
     }
 
 
+# Disconnects are normal traffic, not faults. opencode opens keep-alive
+# connections and drops them when a session ends, and http.server's default
+# response is to dump a full traceback per connection -- which buried a
+# live run's own output under hundreds of ConnectionResetErrors and made
+# the proxy look like it was failing while it was working correctly.
+_BENIGN = (ConnectionResetError, BrokenPipeError, ConnectionAbortedError,
+           TimeoutError)
+
+
+class QuietServer(ThreadingHTTPServer):
+    daemon_threads = True
+    # Long generations hold a connection open; the default would give up.
+    timeout = None
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, _BENIGN):
+            return                      # the client hung up; nothing to say
+        super().handle_error(request, client_address)
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     recorder: Recorder = None       # set on the server class
@@ -137,6 +158,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *a):   # quiet; the JSONL is the log
         pass
+
+    def handle_one_request(self):
+        """Treat a hung-up client as the end of the conversation.
+
+        Without this the reset propagates out of the handler and
+        socketserver logs it as an unhandled error. It also ends the
+        thread mid-request, which is what made a selftest sender die
+        silently on 3.10 and get reported as cross-attribution."""
+        try:
+            super().handle_one_request()
+        except _BENIGN:
+            self.close_connection = True
 
     # ---- control plane -------------------------------------------------
 
@@ -351,7 +384,7 @@ def main():
     Handler.upstream = args.upstream.rstrip("/")
     Handler.inject_usage = not args.no_inject_usage
 
-    srv = ThreadingHTTPServer((args.host, args.port), Handler)
+    srv = QuietServer((args.host, args.port), Handler)
     srv.daemon_threads = True
     print(f"proxy: {args.host}:{args.port} -> {Handler.upstream} "
           f"log={args.log}", flush=True)
