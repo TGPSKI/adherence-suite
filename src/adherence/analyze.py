@@ -111,6 +111,27 @@ def paired_log_ratios(rows, arm, ref, key, success_only):
     return out, dropped
 
 
+def coverage_refusal(name, lrs, dropped, why) -> str | None:
+    """The precondition every paired falsifier shares, in one place.
+
+    A cluster bootstrap needs scenarios, and a heavily-thinned survivor set
+    is not the sample the design registered. F1 guarded on this; F2, F3 and
+    F6 bound `dropped` and never read it, so they could report a confident
+    `k=4` while discarding six scenarios for reasons the reader never saw.
+    Returns the refusal text, or None when the test may proceed."""
+    total = len(lrs) + len(dropped)
+    if len(lrs) < MIN_PAIRED:
+        return (f"only {len(lrs)} of {total} scenario(s) paired; a cluster "
+                f"bootstrap over scenarios needs at least {MIN_PAIRED}. "
+                f"Trials within one scenario are not independent and cannot "
+                f"stand in for scenarios. Dropped: {dropped[:3]}")
+    if len(dropped) > total / 4:
+        return (f"{len(dropped)}/{total} scenarios unusable ({dropped[:3]}). "
+                f"{why} Analysing the survivors reports a verdict about a "
+                f"sample the design did not register")
+    return None
+
+
 def bootstrap_ci(lrs, n=BOOTSTRAP_N, seed=BOOTSTRAP_SEED):
     """Cluster bootstrap over scenarios. Resamples whole scenarios because
     trials within a scenario are not independent; treating them as such
@@ -273,25 +294,32 @@ def evaluate(rows) -> dict:
                "degenerates to tok_in_billed. Requires a metered API")
     else:
         lrs, dropped = paired_log_ratios(rows, TREATMENT, PRACTICAL, "tok_effective", True)
-        pt, lo, hi = bootstrap_ci([x for _, x in lrs])
-        pv = p_from_ci([x for _, x in lrs])
-        ratio = math.exp(pt)
-        tripped = 0.80 <= ratio <= 1.20
-        record("F2", "TRIPPED" if tripped else "not tripped",
-               f"effective tokens {ratio:.3f}x vs {PRACTICAL} "
-               f"(95% CI {math.exp(lo):.3f}-{math.exp(hi):.3f})", pv)
+        refusal = coverage_refusal(
+            "F2", lrs, dropped,
+            "A scenario drops out when neither arm ever succeeded on it.")
+        if refusal:
+            record("F2", "NOT TESTABLE", refusal)
+        else:
+            pt, lo, hi = bootstrap_ci([x for _, x in lrs])
+            pv = p_from_ci([x for _, x in lrs])
+            ratio = math.exp(pt)
+            tripped = 0.80 <= ratio <= 1.20
+            record("F2", "TRIPPED" if tripped else "not tripped",
+                   f"effective tokens {ratio:.3f}x vs {PRACTICAL} "
+                   f"(95% CI {math.exp(lo):.3f}-{math.exp(hi):.3f}, "
+                   f"k={len(lrs)}, dropped={len(dropped)})", pv)
 
     # ---- F3: round trips -----------------------------------------------
     if not {TREATMENT, CONTENT_MATCHED} <= arms:
         record("F3", "NOT TESTABLE", f"needs {TREATMENT} and {CONTENT_MATCHED}")
     else:
         lrs, dropped = paired_log_ratios(rows, TREATMENT, CONTENT_MATCHED, "calls", True)
-        if len(lrs) < MIN_PAIRED:
-            record("F3", "NOT TESTABLE",
-                   f"only {len(lrs)} scenario(s) paired; a cluster bootstrap "
-                   f"over scenarios needs at least {MIN_PAIRED}. Trials within "
-                   f"one scenario are not independent and cannot stand in "
-                   f"for scenarios")
+        refusal = coverage_refusal(
+            "F3", lrs, dropped,
+            "A scenario drops out when neither arm ever succeeded on it, so "
+            "the survivors are the tasks the model could already do.")
+        if refusal:
+            record("F3", "NOT TESTABLE", refusal)
         else:
             pt, lo, hi = bootstrap_ci([x for _, x in lrs])
             pv = p_from_ci([x for _, x in lrs])
@@ -300,7 +328,7 @@ def evaluate(rows) -> dict:
             record("F3", "TRIPPED" if tripped else "not tripped",
                    f"calls {ratio:.3f}x vs {CONTENT_MATCHED} "
                    f"(95% CI {math.exp(lo):.3f}-{math.exp(hi):.3f}, "
-                   f"k={len(lrs)})", pv)
+                   f"k={len(lrs)}, dropped={len(dropped)})", pv)
 
     # ---- F4: pass rate guardrail ---------------------------------------
     if not {TREATMENT, PRACTICAL} <= arms:
@@ -312,9 +340,14 @@ def evaluate(rows) -> dict:
         note = "" if n_scen >= MIN_PAIRED else (
             f" -- on {n_scen} scenario(s), so this is a description of one "
             f"task, not a guardrail verdict")
+        # Signed from the treatment's point of view, to match the order the
+        # two rates are printed in. `drop` is a-drop-is-positive quantity,
+        # so rendering it raw put a minus sign next to a treatment that was
+        # ahead -- correct verdict, backwards-reading evidence.
         record("F4", "TRIPPED" if drop >= 0.10 else "not tripped",
-               f"pass rate {t:.2f} vs {r:.2f} ({drop*100:+.1f}pp); "
-               f"registered threshold -10pp{note}")
+               f"pass rate {TREATMENT} {t:.2f} vs {PRACTICAL} {r:.2f} "
+               f"({-drop*100:+.1f}pp for {TREATMENT}); trips if {TREATMENT} "
+               f"falls >=10pp behind{note}")
 
     # ---- F5: interaction with achieved N -------------------------------
     if len(fixtures) < 2:
@@ -331,10 +364,11 @@ def evaluate(rows) -> dict:
         record("F6", "NOT TESTABLE", f"arm {SPAWN} not run")
     else:
         lrs, dropped = paired_log_ratios(rows, SPAWN, CONTENT_MATCHED, "tok_in_billed", True)
-        if len(lrs) < MIN_PAIRED:
-            record("F6", "NOT TESTABLE",
-                   f"only {len(lrs)} scenario(s) paired; needs at least "
-                   f"{MIN_PAIRED}")
+        refusal = coverage_refusal(
+            "F6", lrs, dropped,
+            "A scenario drops out when neither arm ever succeeded on it.")
+        if refusal:
+            record("F6", "NOT TESTABLE", refusal)
         else:
             pt, lo, hi = bootstrap_ci([x for _, x in lrs])
             pv = p_from_ci([x for _, x in lrs])
@@ -343,7 +377,8 @@ def evaluate(rows) -> dict:
             record("F6", "TRIPPED" if tripped else "not tripped",
                    f"parent+child total {ratio:.3f}x vs inline "
                    f"{CONTENT_MATCHED} (95% CI {math.exp(lo):.3f}-"
-                   f"{math.exp(hi):.3f}, k={len(lrs)})", pv)
+                   f"{math.exp(hi):.3f}, k={len(lrs)}, "
+                   f"dropped={len(dropped)})", pv)
 
     rejected = holm(p)
     for k, v in F.items():
