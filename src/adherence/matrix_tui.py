@@ -447,7 +447,8 @@ class SuiteTui(TuiApp):
             total, avail = self.view_calib(body, max_x)
         self.footer(max_y, max_x, total, avail)
 
-    STATE_COLOR = {"running": 2, "grading": 5, "stalled": 4, "dead": 4}
+    STATE_COLOR = {"running": 2, "grading": 5, "done": 1,
+                   "stalled": 4, "dead": 4}
 
     def view_live(self, body, max_x, max_y=0):
         """Three stacked sections: what is running, what has just been

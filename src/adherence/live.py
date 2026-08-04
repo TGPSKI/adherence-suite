@@ -450,8 +450,14 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
 
         kids = _subagents(p, st.get("root_session", ""))
         timeout = int(m.get("timeout") or 0)
-        if graded:
+        if graded and alive:
             state = "grading"
+        elif graded:
+            # A transcript with no live process is a FINISHED trial whose
+            # directory was kept (--keep-sandbox) or not yet swept. It used
+            # to read "grading" forever, with a deadline clock still
+            # ticking past 100% against a deadline that no longer applies.
+            state = "done"
         elif not alive:
             state = "dead"
         elif age > STALE_S:
@@ -475,7 +481,12 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
             # --timeout overrides scenario.yaml, so substituting the
             # scenario's value would overstate the remaining budget on
             # exactly the runs closest to being killed.
-            "budget": (elapsed / timeout) if timeout else None,
+            # The adapter deadline only governs a trial that is still
+            # generating. Grading is unbounded and a finished trial is not
+            # racing anything, so a percentage there is meaningless -- it
+            # read 104% on a run that had already stopped.
+            "budget": ((min(elapsed / timeout, 1.0) if timeout else None)
+                       if state in ("running", "stalled") else None),
             "idle_s": age,
             "state": state,
             "unlabelled": bool(m.get("unlabelled")),
