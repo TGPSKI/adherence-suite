@@ -51,6 +51,8 @@ SECTIONS = ("running", "summary", "graded")
 # Per-section sorts, cycled with [s] on whichever section has focus.
 GRADED_SORTS = ("recent", "verdict", "tok", "dur")
 SUM_SORTS = ("tag", "pass", "tok", "dur", "left")
+TASK_SORTS = ("id", "grader", "files", "dirs", "pr")
+DESIGN_SORTS = ("arm", "always", "ondemand")
 GATE = 0.02          # H4 tolerance
 
 
@@ -98,6 +100,10 @@ class SuiteTui(TuiApp):
         self.sum_sort = 0
         self._tasks = None       # static; loaded once, never per tick
         self._design = None
+        self.task_sort = 0
+        self.task_desc = False
+        self.design_sort = 0
+        self.design_desc = False
         self.pane_scroll = 0     # shared by the scrollable detail panes
         # Direction is separate from key, so [S] flips without losing the
         # column you picked. Defaults are the useful end: newest graded
@@ -221,7 +227,9 @@ class SuiteTui(TuiApp):
         `cursor` -- so holding [j] walked the selection off the end of the
         list, the highlight vanished, and [space] then opened a detail
         pane for a row that was never on screen."""
-        n = (len(self.task_rows()) if VIEWS[self.view] == "tasks"
+        v = VIEWS[self.view]
+        n = (len(self.task_rows()) if v == "tasks"
+             else len(self.design_rows()) if v == "design"
              else len(self.visible()))
         if not n:
             self.cursor = self.scroll = 0
@@ -269,7 +277,20 @@ class SuiteTui(TuiApp):
             self._put(0, x, f" {name} ", attr)
             x += len(name) + 3
         filt = self.buf if self.editing else (self.pattern or "all")
-        tail = f"filter:{filt}  sort:{SORTS[self.sort]}  ref:{self.ref}"
+        # The sort shown must be the one [s] would change here. It used to
+        # be the cells sort on every tab, so `sort:tok` sat above a task
+        # list that [s] did not touch.
+        if v == "tasks":
+            sort = f"{TASK_SORTS[self.task_sort]} " \
+                   f"{'v' if self.task_desc else '^'}"
+        elif v == "design":
+            sort = f"{DESIGN_SORTS[self.design_sort]} " \
+                   f"{'v' if self.design_desc else '^'}"
+        elif v == "live":
+            sort = SECTIONS[self.live_section]
+        else:
+            sort = SORTS[self.sort]
+        tail = f"filter:{filt}  sort:{sort}  ref:{self.ref}"
         self._put(0, max(x + 2, max_x - len(tail) - 2), tail,
                   C.A_BOLD if self.editing else C.A_DIM)
         self._put(1, 1, VIEW_HELP[v], C.A_DIM)
@@ -326,7 +347,8 @@ class SuiteTui(TuiApp):
             keys = [("[tab/shift-tab] view", C.A_DIM),
                     (f"[L] live·{n_live}",
                      C.color_pair(2) if n_live else C.A_DIM),
-                    ("[s] sort", C.A_DIM), ("[/] filter", C.A_DIM),
+                    ("[s] sort [S] asc/desc", C.A_DIM),
+                    ("[/] filter", C.A_DIM),
                     ("[F] clear", C.A_DIM), ("[p] pick", C.A_DIM),
                     ("[space] detail", C.A_DIM), ("[r] reload", C.A_DIM),
                     ("[q] quit", C.A_DIM)]
@@ -500,6 +522,13 @@ class SuiteTui(TuiApp):
 
         cells = self.sum_cells()
         # ---- per (arm, scenario) rollup --------------------------------
+        if not cells:
+            self._put(y, 1, "summary — per arm x scenario"
+                            + ("  ◀" if self.live_section == 1 else ""),
+                      C.color_pair(5) if self.live_section == 1 else C.A_BOLD)
+            self._put(y + 1, 3, "nothing graded yet — a cell appears once a "
+                                "trial finishes", C.A_DIM)
+            y += 3
         if cells:
             self._put(y, 1, f"summary — per arm x scenario, sorted by "
                             f"{SUM_SORTS[self.sum_sort]} "
@@ -567,6 +596,13 @@ class SuiteTui(TuiApp):
         # Newest first: a run in progress is judged by what just landed,
         # not by what landed an hour ago.
         recent = self.graded_rows()
+        if not recent:
+            self._put(y, 1, "graded"
+                            + ("  ◀" if self.live_section == 2 else ""),
+                      C.color_pair(5) if self.live_section == 2 else C.A_BOLD)
+            self._put(y + 1, 3, "no results yet — the first row lands when a "
+                                "trial finishes and is graded", C.A_DIM)
+            y += 3
         if recent:
             self._put(y, 1, f"graded — sorted by "
                             f"{GRADED_SORTS[self.graded_sort]} "
@@ -964,8 +1000,19 @@ class SuiteTui(TuiApp):
                 self._tasks = tk.load()
             except Exception:
                 self._tasks = []
-        return [t for t in self._tasks
+        rows = [t for t in self._tasks
                 if sd.matches(t["id"], self.pattern)]
+        mode = TASK_SORTS[self.task_sort]
+        keys = {
+            "id": lambda t: t["id"],
+            # cli-graded first when descending: it is the exception and the
+            # thing worth finding.
+            "grader": lambda t: (t["grader"], t["id"]),
+            "files": lambda t: (len(t["code_files"]), t["id"]),
+            "dirs": lambda t: (len(t["dirs"]), t["id"]),
+            "pr": lambda t: (str(t["pr"]), t["id"]),
+        }
+        return sorted(rows, key=keys[mode], reverse=self.task_desc)
 
     def view_tasks(self, rows, body, max_x):
         C = self.curses
@@ -1077,7 +1124,13 @@ class SuiteTui(TuiApp):
                 self._design = dz.load()
             except Exception:
                 self._design = []
-        return self._design
+        mode = DESIGN_SORTS[self.design_sort]
+        keys = {
+            "arm": lambda r: r["arm"],
+            "always": lambda r: r["always_bytes"],
+            "ondemand": lambda r: r["ondemand_bytes"],
+        }
+        return sorted(self._design, key=keys[mode], reverse=self.design_desc)
 
     def view_design(self, rows, body, max_x):
         C = self.curses
@@ -1111,12 +1164,13 @@ class SuiteTui(TuiApp):
         self._put(y, 1, "ground rules — [space] on an arm for its purpose "
                         "and files", C.A_BOLD)
         y += 1
+        width = max(len(k) for k, _ in dz.GROUND_RULES) + 2
         for k, v in dz.GROUND_RULES:
             if y >= body + 2:
                 break
-            self._put(y, 3, f"{k}", 0)
-            for ln in self._wrap(v, max_x - 30)[:1]:
-                self._put(y, 30, ln, C.A_DIM)
+            self._put(y, 3, k[:width - 1], 0)
+            for ln in self._wrap(v, max_x - width - 6)[:1]:
+                self._put(y, 3 + width, ln, C.A_DIM)
             y += 1
         return 0, 0
 
@@ -1602,12 +1656,22 @@ class SuiteTui(TuiApp):
             self.view = (self.view - 1) % len(VIEWS)
             self.scroll = self.cursor = 0
         elif key == ord("S"):
-            if VIEWS[self.view] == "live" and self.live_section == 2:
+            if VIEWS[self.view] == "tasks":
+                self.task_desc = not self.task_desc
+            elif VIEWS[self.view] == "design":
+                self.design_desc = not self.design_desc
+            elif VIEWS[self.view] == "live" and self.live_section == 2:
                 self.graded_desc = not self.graded_desc
             elif VIEWS[self.view] == "live" and self.live_section == 1:
                 self.sum_desc = not self.sum_desc
         elif key == ord("s"):
-            if VIEWS[self.view] == "live" and self.live_section == 2:
+            if VIEWS[self.view] == "tasks":
+                self.task_sort = (self.task_sort + 1) % len(TASK_SORTS)
+                self.cursor = self.scroll = 0
+            elif VIEWS[self.view] == "design":
+                self.design_sort = (self.design_sort + 1) % len(DESIGN_SORTS)
+                self.cursor = self.scroll = 0
+            elif VIEWS[self.view] == "live" and self.live_section == 2:
                 self.graded_sort = (self.graded_sort + 1) % len(GRADED_SORTS)
                 self.graded_scroll = 0
             elif VIEWS[self.view] == "live" and self.live_section == 1:
