@@ -210,19 +210,95 @@ def _subagents(out_dir: Path, root_session: str) -> dict:
     between versions, and a viewer must never block a run. On any failure
     this reports nothing rather than a number it cannot stand behind."""
     db = out_dir / "xdg" / "data" / "opencode" / "opencode.db"
+    empty = {"sessions": [], "root": root_session, "readable": False,
+             "calls": 0, "tok_in": 0, "tok_out": 0}
     if not db.exists():
-        return {"sessions": [], "root": root_session, "readable": False}
+        return dict(empty)
     try:
         con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
         con.execute("PRAGMA query_only=ON")
         rows = list(con.execute(
             "SELECT id, parent_id, COALESCE(agent,'') FROM session "
             "WHERE parent_id IS NOT NULL ORDER BY time_created ASC"))
+        kids = [(sid, agent) for sid, _parent, agent in rows]
+        calls = tok_in = tok_out = 0
+        if kids:
+            ids = [s for s, _a in kids]
+            placeholders = ",".join("?" * len(ids))
+            q = f"SELECT data FROM part WHERE session_id IN ({placeholders})"
+            for (data,) in con.execute(q, ids):
+                try:
+                    d = json.loads(data)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                # Same event the root stream calls step_finish; the store
+                # spells it with a hyphen.
+                if d.get("type") == "step-finish":
+                    calls += 1
+                    tk = d.get("tokens") or {}
+                    tok_in += tk.get("input") or 0
+                    tok_out += tk.get("output") or 0
         con.close()
     except Exception:
-        return {"sessions": [], "root": root_session, "readable": False}
-    kids = [(sid, agent) for sid, parent, agent in rows]
-    return {"sessions": kids, "root": root_session, "readable": True}
+        return dict(empty)
+    return {"sessions": kids, "root": root_session, "readable": True,
+            "calls": calls, "tok_in": tok_in, "tok_out": tok_out}
+
+
+def activity(out_dir: Path, limit: int = 60) -> list[dict]:
+    """The trial's recent events, with tool output.
+
+    The NDJSON stream carries a tool call's *input* and status but not
+    what it returned -- so a viewer built on the stream alone can say "it
+    ran go test" and never what go test said, which is the one thing worth
+    knowing while a run is in flight. opencode's store keeps the output,
+    and the runner puts that store in the out-dir.
+
+    Read-only and best-effort, like everything else here: the writer is
+    live and the schema is private."""
+    db = out_dir / "xdg" / "data" / "opencode" / "opencode.db"
+    if not db.exists():
+        return []
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        con.execute("PRAGMA query_only=ON")
+        kids = {s for (s,) in con.execute(
+            "SELECT id FROM session WHERE parent_id IS NOT NULL")}
+        rows = list(con.execute(
+            "SELECT session_id, data, time_created FROM part "
+            "ORDER BY time_created DESC LIMIT ?", (limit * 6,)))
+        con.close()
+    except Exception:
+        return []
+
+    out = []
+    for sid, data, ts in rows:
+        try:
+            d = json.loads(data)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        kind = d.get("type")
+        who = "subagent" if sid in kids else "agent"
+        if kind == "tool":
+            st = d.get("state") or {}
+            inp = st.get("input") or {}
+            body = st.get("error") or st.get("output") or ""
+            out.append({
+                "ts": ts, "who": who, "kind": "tool",
+                "name": d.get("tool") or "?",
+                "target": _target(inp),
+                "status": st.get("status") or "",
+                "text": " ".join(str(body).split())[:400],
+                "failed": bool(st.get("error")),
+            })
+        elif kind == "text":
+            body = " ".join((d.get("text") or "").split())
+            if body:
+                out.append({"ts": ts, "who": who, "kind": "text",
+                            "name": "", "target": "", "status": "",
+                            "text": body[:400], "failed": False})
+    out.sort(key=lambda e: e["ts"])
+    return out[-limit:]
 
 
 def _scenario_info(scenario: str, root: Path) -> dict:
@@ -354,6 +430,14 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
             "child_sessions": len(kids["sessions"]),
             "child_agents": [a for _s, a in kids["sessions"] if a],
             "children_readable": kids["readable"],
+            "child_calls": kids["calls"],
+            "child_tok_in": kids["tok_in"],
+            "child_tok_out": kids["tok_out"],
+            # The number E3 is actually a claim about: parent + every
+            # child. Quoting the root total alone would confirm "subagent
+            # handoff is 0-cost" by leaving the cost out of the number.
+            "total_calls": st["calls"] + kids["calls"],
+            "total_tok_in": st["tok_in"] + kids["tok_in"],
             "info": _scenario_info(m.get("scenario", ""), root),
             **st,
         })
@@ -372,8 +456,9 @@ def summarize(runs) -> dict:
         "running": sum(1 for r in runs if r["state"] == "running"),
         "grading": sum(1 for r in runs if r["state"] == "grading"),
         "stalled": sum(1 for r in runs if r["state"] in ("stalled", "dead")),
-        "calls": sum(r["calls"] for r in runs),
-        "tok_in": sum(r["tok_in"] for r in runs),
+        "calls": sum(r["total_calls"] for r in runs),
+        "tok_in": sum(r["total_tok_in"] for r in runs),
+        "child_calls": sum(r["child_calls"] for r in runs),
     }
 
 
@@ -450,14 +535,18 @@ def main():
         return 0
     s = summarize(runs)
     print(f"{s['running']} running, {s['grading']} grading, "
-          f"{s['stalled']} stalled — {s['calls']} calls, "
-          f"{s['tok_in']:,} input tokens so far\n")
+          f"{s['stalled']} stalled — {s['calls']} calls "
+          f"({s['child_calls']} in subagents), "
+          f"{s['tok_in']:,} input tokens so far\n"
+          f"calls and tokens are parent + children (§7)\n")
     print(f"{'scenario':<20}{'arm':>4}{'t':>3}{'state':>9}{'calls':>7}"
-          f"{'tools':>7}{'tok_in':>11}{'elapsed':>9}{'budget':>8}  activity")
+          f"{'tools':>7}{'sub':>5}{'tok_in':>12}{'elapsed':>9}"
+          f"{'budget':>8}  activity")
     for r in runs:
         print(f"{r['scenario'][:19]:<20}{r['arm']:>4}{r['trial']:>3}"
-              f"{r['state']:>9}{r['calls']:>7}{r['tools']:>7}"
-              f"{r['tok_in']:>11,}{fmt_age(r['elapsed_s']):>9}"
+              f"{r['state']:>9}{r['total_calls']:>7}{r['tools']:>7}"
+              f"{r['child_sessions']:>5}"
+              f"{r['total_tok_in']:>12,}{fmt_age(r['elapsed_s']):>9}"
               f"{fmt_budget(r['budget']):>8}  {r['last_tool'][:50]}")
     if any(r["unlabelled"] for r in runs):
         print("\n? arm/trial: run started before the runner wrote its marker; "

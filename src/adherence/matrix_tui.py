@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from pathlib import Path
 
 from adherence import live as lv
 from adherence import suitedata as sd
@@ -287,14 +288,15 @@ class SuiteTui(TuiApp):
                           C.A_DIM)
                 self._put(y, 28, f"{r['state']:>9}",
                           C.color_pair(self.STATE_COLOR.get(r["state"], 0)))
-                self._put(y, 37, f"{r['calls']:>7}", 0)
+                self._put(y, 37, f"{r['total_calls']:>7}", 0)
                 self._put(y, 44, f"{r['tools']:>6}", C.A_DIM)
                 # Child SESSIONS, from opencode's own store -- the root
                 # stream carries none of a subagent's calls, so counting
                 # session ids in the stream always answered 0.
                 self._put(y, 50, f"{r['child_sessions']:>5}",
                           C.color_pair(3) if r["child_sessions"] else C.A_DIM)
-                self._put(y, 55, f"{r['tok_in']:>12,}", C.color_pair(2))
+                self._put(y, 55, f"{r['total_tok_in']:>12,}",
+                          C.color_pair(2))
                 self._put(y, 67, f"{lv.fmt_age(r['elapsed_s']):>9}", C.A_DIM)
                 b = r["budget"]
                 self._put(y, 76, f"{lv.fmt_budget(b):>8}",
@@ -450,21 +452,26 @@ class SuiteTui(TuiApp):
                       f"   budget {lv.fmt_budget(r['budget'])}"
                       f"   idle {lv.fmt_age(r['idle_s'])}",
              C.color_pair(self.STATE_COLOR.get(r["state"], 0)))
-        line("cost so far", f"{r['calls']} calls · {r['tok_in']:,} in · "
-                            f"{r['tok_out']:,} out · cache "
-                            f"{r['cache_read']:,}r/{r['cache_write']:,}w"
-                            + ("   (ROOT SESSION ONLY)"
-                               if r["child_sessions"] else ""))
+        # parent + children, which is the only total §7 permits quoting as
+        # a cost. The split is shown because E3 is a claim about the child
+        # half specifically.
+        line("cost so far", f"{r['total_calls']} calls · "
+                            f"{r['total_tok_in']:,} in · "
+                            f"{r['tok_out'] + r['child_tok_out']:,} out · "
+                            f"cache {r['cache_read']:,}r/"
+                            f"{r['cache_write']:,}w")
+        line("  parent", f"{r['calls']} calls · {r['tok_in']:,} in")
         if r["child_sessions"]:
-            # Measured at 3.1x under-report on s13: a subagent runs in its
-            # own opencode session and the root stream carries none of its
-            # calls. Saying the total is root-only matters most here,
-            # because E3 is the claim that this handoff is free.
-            line("subagents", f"{r['child_sessions']} dispatched session(s): "
-                              f"{', '.join(r['child_agents'][:4]) or '?'}",
+            line("  subagents", f"{r['child_calls']} calls · "
+                                f"{r['child_tok_in']:,} in   "
+                                f"({r['child_sessions']} session(s): "
+                                f"{', '.join(r['child_agents'][:4]) or '?'})",
                  C.color_pair(3))
-            line("", "their calls and tokens are NOT in the totals above — "
-                     "separate sessions, counted at grading time", C.A_DIM)
+            share = (r["child_tok_in"] / r["total_tok_in"]
+                     if r["total_tok_in"] else 0)
+            line("", f"subagents are {share:.0%} of this trial's input "
+                     f"tokens — read live from opencode's store, since the "
+                     f"root stream carries none of them", C.A_DIM)
         elif not r["children_readable"] and r["spawns"]:
             line("subagents", f"{len(r['spawns'])} spawn(s) seen in the "
                               f"stream; opencode's store was not readable",
@@ -496,14 +503,44 @@ class SuiteTui(TuiApp):
             for sp in r["spawns"][:3]:
                 line("", f"· {sp}", C.A_DIM)
         y += 1
-        line("last tool", r["last_tool"] or "—")
-        wrapped("last message", r["last_text"] or "—", limit=4)
-        y += 1
         line("sandbox", r["sandbox"] or "—", C.A_DIM)
         line("out dir", r["out_dir"], C.A_DIM)
         if r["partial_lines"]:
             line("note", f"{r['partial_lines']} unparsed line(s) — normal "
                          f"while the stream is being written", C.A_DIM)
+        y += 1
+
+        # ---- live activity, with what the tools actually returned -------
+        # The NDJSON stream carries a call's input and status but not its
+        # output, so a feed built on the stream alone can say "it ran go
+        # test" and never what go test said. This comes from opencode's
+        # store, which keeps both.
+        room = max_y - y - 2
+        if room > 3:
+            self._put(y, 1, "activity — newest last", C.A_BOLD)
+            y += 1
+            try:
+                ev = lv.activity(Path(r["out_dir"]), limit=room)
+            except Exception:
+                ev = []
+            if not ev:
+                self._put(y, 3, "no activity recorded yet", C.A_DIM)
+            for e in ev[-room:]:
+                if y >= max_y - 1:
+                    break
+                tag = "sub" if e["who"] == "subagent" else "   "
+                self._put(y, 1, f"{tag:>4}", C.color_pair(3)
+                          if e["who"] == "subagent" else C.A_DIM)
+                if e["kind"] == "tool":
+                    head = f"{e['name']} {e['target']}"[:44]
+                    self._put(y, 6, f"{head:<44}",
+                              C.color_pair(4) if e["failed"] else 0)
+                    self._put(y, 51, e["text"][:max(0, max_x - 53)],
+                              C.color_pair(4) if e["failed"] else C.A_DIM)
+                else:
+                    self._put(y, 6, "say", C.A_DIM)
+                    self._put(y, 51, e["text"][:max(0, max_x - 53)], C.A_DIM)
+                y += 1
 
     def view_cells(self, cs, body, max_x):
         C = self.curses
