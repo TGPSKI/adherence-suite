@@ -23,6 +23,7 @@ import errno
 import glob
 import json
 import os
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -131,6 +132,7 @@ def _stream(path: Path) -> dict:
     spawns: list[str] = []
     first_ts = last_ts = 0
     partial = 0
+    root_sid = ""
     try:
         with open(path, errors="replace") as f:
             for line in f:
@@ -148,6 +150,8 @@ def _stream(path: Path) -> dict:
                     first_ts = first_ts or ts
                     last_ts = ts
                 sid = e.get("sessionID") or ""
+                if sid and not root_sid:
+                    root_sid = sid
                 t = e.get("type")
                 if t == "step_finish":
                     calls += 1
@@ -188,7 +192,37 @@ def _stream(path: Path) -> dict:
             "sessions": len(sessions), "subagent_calls":
                 sum(sorted(sessions.values())[:-1]) if len(sessions) > 1 else 0,
             "first_ts": first_ts, "last_ts": last_ts,
-            "partial_lines": partial}
+            "root_session": root_sid, "partial_lines": partial}
+
+
+def _subagents(out_dir: Path, root_session: str) -> dict:
+    """Child sessions this trial has dispatched, read live.
+
+    A subagent runs in its OWN opencode session, and neither the root
+    stream nor the root export carries a single one of its inference calls
+    -- measured at 3.1x under-report on s13. So the stream this view reads
+    cannot see subagent cost at all, and reporting its totals without
+    saying so would understate exactly the number E3 is a claim about.
+
+    The runner gives every trial its own XDG_DATA_HOME under the out-dir,
+    so opencode's store is right here while the run is live. Read-only and
+    best-effort: the writer is active, the schema is private and may move
+    between versions, and a viewer must never block a run. On any failure
+    this reports nothing rather than a number it cannot stand behind."""
+    db = out_dir / "xdg" / "data" / "opencode" / "opencode.db"
+    if not db.exists():
+        return {"sessions": [], "root": root_session, "readable": False}
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        con.execute("PRAGMA query_only=ON")
+        rows = list(con.execute(
+            "SELECT id, parent_id, COALESCE(agent,'') FROM session "
+            "WHERE parent_id IS NOT NULL ORDER BY time_created ASC"))
+        con.close()
+    except Exception:
+        return {"sessions": [], "root": root_session, "readable": False}
+    kids = [(sid, agent) for sid, parent, agent in rows]
+    return {"sessions": kids, "root": root_session, "readable": True}
 
 
 def _scenario_info(scenario: str, root: Path) -> dict:
@@ -283,6 +317,7 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
         if st["first_ts"]:
             elapsed = max(elapsed, (now * 1000 - st["first_ts"]) / 1000.0)
 
+        kids = _subagents(p, st.get("root_session", ""))
         timeout = int(m.get("timeout") or 0)
         if graded:
             state = "grading"
@@ -313,6 +348,12 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
             "idle_s": age,
             "state": state,
             "unlabelled": bool(m.get("unlabelled")),
+            # Dispatched subagents, from opencode's own store. `tok_in`
+            # above is ROOT ONLY -- their calls are in separate sessions
+            # the root stream never sees.
+            "child_sessions": len(kids["sessions"]),
+            "child_agents": [a for _s, a in kids["sessions"] if a],
+            "children_readable": kids["readable"],
             "info": _scenario_info(m.get("scenario", ""), root),
             **st,
         })

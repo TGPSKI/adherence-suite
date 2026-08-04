@@ -169,7 +169,10 @@ class SuiteTui(TuiApp):
             pct = 100.0 * n / self.expect
             bar_w = 18
             fill = int(bar_w * min(n / self.expect, 1.0))
-            prog = (f"{'#' * fill}{'.' * (bar_w - fill)} "
+            # Bracketed, and a track character that cannot be mistaken for
+            # an ellipsis: an empty bar rendered as "................"
+            # reads as truncated output, not as 0%.
+            prog = (f"[{'█' * fill}{'·' * (bar_w - fill)}] "
                     f"{n}/{self.expect} {pct:.0f}%")
             done = n >= self.expect
             self._put(1, max(len(VIEW_HELP[v]) + 3, max_x - len(prog) - 2),
@@ -250,44 +253,144 @@ class SuiteTui(TuiApp):
     STATE_COLOR = {"running": 2, "grading": 5, "stalled": 4, "dead": 4}
 
     def view_live(self, body, max_x):
+        """Three stacked sections: what is running, what has just been
+        graded, and the per-(arm, scenario) rollup that says whether the
+        grid is on pace. A single flat table cannot answer 'is it working'
+        and 'how long will this take' at the same time."""
         C = self.curses
         runs = self.live
-        if not runs:
-            self._put(3, 3, "nothing in flight — start a run, or [tab] to "
-                            "the results views", C.A_DIM)
-            return 0, 0
+        y = 3
         s = lv.summarize(runs)
-        self._put(3, 1, f"{s['running']} running · {s['grading']} grading · "
-                        f"{s['stalled']} stalled · {s['calls']} calls · "
-                        f"{s['tok_in']:,} input tokens", C.A_BOLD)
-        self._put(4, 1, f"{'scenario':<20}{'arm':>4}{'t':>3}{'state':>9}"
-                        f"{'calls':>7}{'tools':>7}{'sub':>5}{'tok_in':>12}"
-                        f"{'elapsed':>9}{'budget':>8}  doing", C.A_DIM)
-        avail = max(1, body - 3)
-        self.live_cursor = max(0, min(self.live_cursor, len(runs) - 1))
-        for i, r in enumerate(runs[:avail]):
-            y = 5 + i
-            base = C.color_pair(5) if i == self.live_cursor else 0
-            self._put(y, 1, f"{r['scenario'][:19]:<20}", base)
-            self._put(y, 21, f"{r['arm']:>4}", C.A_DIM if r["unlabelled"]
-                      else 0)
-            self._put(y, 25, f"{r['trial'] if r['trial'] >= 0 else '?':>3}",
+        done = len(self.rows)
+        self._put(y, 1, f"{s['running']} running · {s['grading']} grading · "
+                        f"{s['stalled']} stalled · {done} graded"
+                        + (f"/{self.expect}" if self.expect else "")
+                        + f" · {s['calls']} calls · {s['tok_in']:,} in",
+                  C.A_BOLD)
+        y += 2
+
+        # ---- running ---------------------------------------------------
+        if runs:
+            self._put(y, 1, f"{'scenario':<20}{'arm':>4}{'t':>3}{'state':>9}"
+                            f"{'calls':>7}{'tools':>6}{'sub':>5}{'tok_in':>12}"
+                            f"{'elapsed':>9}{'budget':>8}  doing", C.A_DIM)
+            y += 1
+            self.live_cursor = max(0, min(self.live_cursor, len(runs) - 1))
+            shown = runs[:max(1, min(len(runs), body - 12))]
+            for i, r in enumerate(shown):
+                base = C.color_pair(5) if i == self.live_cursor else 0
+                self._put(y, 1, f"{r['scenario'][:19]:<20}", base)
+                self._put(y, 21, f"{r['arm']:>4}",
+                          C.A_DIM if r["unlabelled"] else 0)
+                self._put(y, 25,
+                          f"{r['trial'] if r['trial'] >= 0 else '?':>3}",
+                          C.A_DIM)
+                self._put(y, 28, f"{r['state']:>9}",
+                          C.color_pair(self.STATE_COLOR.get(r["state"], 0)))
+                self._put(y, 37, f"{r['calls']:>7}", 0)
+                self._put(y, 44, f"{r['tools']:>6}", C.A_DIM)
+                # Child SESSIONS, from opencode's own store -- the root
+                # stream carries none of a subagent's calls, so counting
+                # session ids in the stream always answered 0.
+                self._put(y, 50, f"{r['child_sessions']:>5}",
+                          C.color_pair(3) if r["child_sessions"] else C.A_DIM)
+                self._put(y, 55, f"{r['tok_in']:>12,}", C.color_pair(2))
+                self._put(y, 67, f"{lv.fmt_age(r['elapsed_s']):>9}", C.A_DIM)
+                b = r["budget"]
+                self._put(y, 76, f"{lv.fmt_budget(b):>8}",
+                          C.color_pair(4) if b and b > 0.8 else C.A_DIM)
+                self._put(y, 86, r["last_tool"][:max(0, max_x - 88)], C.A_DIM)
+                y += 1
+            if len(runs) > len(shown):
+                self._put(y, 1, f"  … {len(runs) - len(shown)} more running",
+                          C.A_DIM)
+                y += 1
+        else:
+            self._put(y, 3, "nothing in flight", C.A_DIM)
+            y += 1
+        y += 1
+
+        # ---- graded ----------------------------------------------------
+        # Newest first: a run in progress is judged by what just landed,
+        # not by what landed an hour ago.
+        recent = sorted(self.rows, key=lambda r: r.get("_seq", 0))[-6:][::-1]
+        if recent:
+            self._put(y, 1, "graded — most recent first", C.A_BOLD)
+            y += 1
+            self._put(y, 1, f"{'scenario':<20}{'arm':>4}{'t':>3}{'verdict':>9}"
+                            f"{'calls':>7}{'tok_in':>12}{'dur':>9}  failing",
                       C.A_DIM)
-            self._put(y, 28, f"{r['state']:>9}",
-                      C.color_pair(self.STATE_COLOR.get(r["state"], 0)))
-            self._put(y, 37, f"{r['calls']:>7}", 0)
-            self._put(y, 44, f"{r['tools']:>7}", C.A_DIM)
-            self._put(y, 51, f"{r['sessions'] - 1 if r['sessions'] else 0:>5}",
-                      C.A_DIM)
-            self._put(y, 56, f"{r['tok_in']:>12,}", C.color_pair(2))
-            self._put(y, 68, f"{lv.fmt_age(r['elapsed_s']):>9}", C.A_DIM)
-            # Red once the run is close enough to its timeout that it is
-            # probably going to be killed rather than finish.
-            b = r["budget"]
-            self._put(y, 77, f"{lv.fmt_budget(b):>8}",
-                      C.color_pair(4) if b and b > 0.8 else C.A_DIM)
-            self._put(y, 87, r["last_tool"][:max(0, max_x - 89)], C.A_DIM)
-        return len(runs), avail
+            y += 1
+            for r in recent:
+                if y >= 3 + body - 6:
+                    break
+                m = r.get("metrics") or {}
+                ung = [c for c in r["checks"]
+                       if c.get("name") == "adapter"
+                       and c.get("status") != "pass"]
+                verdict = ("ungradeable" if ung else
+                           "pass" if r["all_pass"] else "fail")
+                col = (C.color_pair(3) if ung else
+                       C.color_pair(1) if r["all_pass"] else C.color_pair(4))
+                fails = ", ".join(c["name"] for c in r["checks"]
+                                  if c["status"] == "fail") or "—"
+                self._put(y, 1, f"{r['scenario'][:19]:<20}")
+                self._put(y, 21, f"{r.get('arm', '-'):>4}", C.A_DIM)
+                self._put(y, 25, f"{r['trial']:>3}", C.A_DIM)
+                self._put(y, 28, f"{verdict:>9}", col)
+                self._put(y, 37, f"{m.get('calls', 0):>7}", C.A_DIM)
+                self._put(y, 44, f"{m.get('tok_in_billed', 0):>12,}", C.A_DIM)
+                self._put(y, 56, f"{lv.fmt_age(r.get('duration_s', 0)):>9}",
+                          C.A_DIM)
+                self._put(y, 67, fails[:max(0, max_x - 69)], C.A_DIM)
+                y += 1
+            y += 1
+
+        # ---- per (arm, scenario) rollup --------------------------------
+        cells = sd.load_cells(paths=self.files)
+        if cells:
+            self._put(y, 1, "per arm × scenario — pace and cost so far",
+                      C.A_BOLD)
+            y += 1
+            self._put(y, 1, f"{'arm/scenario':<24}{'done':>6}{'ung':>5}"
+                            f"{'pass':>6}{'med tok':>11}{'p90 tok':>11}"
+                            f"{'calls':>7}{'tools':>7}{'sub':>5}"
+                            f"{'med dur':>9}{'p90 dur':>9}{'left':>5}"
+                            f"{'eta':>8}", C.A_DIM)
+            y += 1
+            # Trials per cell, from the batch size when it is known.
+            per_cell = 0
+            if self.expect and cells:
+                per_cell = max(1, round(self.expect / max(1, len(cells))))
+            for c in cells:
+                if y >= 3 + body - 1:
+                    break
+                left = max(0, per_cell - c["trials"]) if per_cell else 0
+                eta = left * c["dur_s"]
+                self._put(y, 1, f"{c['tag'][:23]:<24}")
+                self._put(y, 25, f"{c['trials']:>6}", C.A_DIM)
+                self._put(y, 31, f"{c['ungradeable']:>5}",
+                          C.color_pair(3) if c["ungradeable"] else C.A_DIM)
+                self._put(y, 36, f"{c['pass_rate']:>5.0f}%",
+                          self.pass_attr(c["pass_rate"]))
+                self._put(y, 42, f"{c['tok']:>11,.0f}", C.color_pair(2))
+                # p90 in red when the tail is far past the middle: a median
+                # that halves while the tail doubles is not a saving.
+                tail = (c["p90_tok"] / c["tok"]) if c["tok"] else 0
+                self._put(y, 53, f"{c['p90_tok']:>11,.0f}",
+                          C.color_pair(4) if tail >= 2 else C.A_DIM)
+                self._put(y, 64, f"{c['calls']:>7.0f}", C.A_DIM)
+                self._put(y, 71, f"{c['avg_tools']:>7.1f}", C.A_DIM)
+                self._put(y, 78, f"{c['n_subagents']:>5.0f}",
+                          C.color_pair(3) if c["n_subagents"] else C.A_DIM)
+                self._put(y, 83, f"{lv.fmt_age(c['dur_s']):>9}", C.A_DIM)
+                self._put(y, 92, f"{lv.fmt_age(c['p90_dur']):>9}", C.A_DIM)
+                self._put(y, 101, f"{left:>5}" if per_cell else f"{'—':>5}",
+                          C.A_DIM)
+                self._put(y, 106, f"{lv.fmt_age(eta):>8}" if eta
+                          else f"{'—':>8}", C.A_DIM)
+                y += 1
+        return 0, 0
 
     def view_live_detail(self, r, max_y, max_x):
         C = self.curses
@@ -349,10 +452,23 @@ class SuiteTui(TuiApp):
              C.color_pair(self.STATE_COLOR.get(r["state"], 0)))
         line("cost so far", f"{r['calls']} calls · {r['tok_in']:,} in · "
                             f"{r['tok_out']:,} out · cache "
-                            f"{r['cache_read']:,}r/{r['cache_write']:,}w")
-        if r["sessions"] > 1:
-            line("subagents", f"{r['sessions'] - 1} session(s), "
-                              f"{r['subagent_calls']} of the calls above")
+                            f"{r['cache_read']:,}r/{r['cache_write']:,}w"
+                            + ("   (ROOT SESSION ONLY)"
+                               if r["child_sessions"] else ""))
+        if r["child_sessions"]:
+            # Measured at 3.1x under-report on s13: a subagent runs in its
+            # own opencode session and the root stream carries none of its
+            # calls. Saying the total is root-only matters most here,
+            # because E3 is the claim that this handoff is free.
+            line("subagents", f"{r['child_sessions']} dispatched session(s): "
+                              f"{', '.join(r['child_agents'][:4]) or '?'}",
+                 C.color_pair(3))
+            line("", "their calls and tokens are NOT in the totals above — "
+                     "separate sessions, counted at grading time", C.A_DIM)
+        elif not r["children_readable"] and r["spawns"]:
+            line("subagents", f"{len(r['spawns'])} spawn(s) seen in the "
+                              f"stream; opencode's store was not readable",
+                 C.A_DIM)
         if info.get("pr"):
             line("source PR", f"#{info['pr']}   base "
                               f"{info.get('base_commit', '')[:12]}")
@@ -526,21 +642,20 @@ class SuiteTui(TuiApp):
             # The old text pointed at bench/with-proxy.sh, which does not
             # exist and never did, and omitted the reason this tab is empty
             # for most runs: the gate cannot be measured in parallel at all.
-            self._put(3, 3, "no proxy log loaded. The recording proxy runs "
-                            "only when ADH_PROXY_LOG is set:", C.A_DIM)
-            self._put(4, 5, "ADH_PROXY_LOG=runs/proxy.jsonl make probe "
-                            "ARMSDIR=... JOBS=3", C.A_BOLD)
-            self._put(5, 5, "make matrix PROXY=runs/proxy.jsonl", C.A_BOLD)
-            self._put(7, 3, "Parallel runs are fine: each trial routes "
-                            "through its own /__run/<id> path, so "
-                            "attribution", C.A_DIM)
-            self._put(8, 3, "arrives with the request instead of coming "
-                            "from a mark two trials would fight over.",
-                      C.A_DIM)
-            self._put(10, 3, "Without a proxy the adapter's token counts "
-                             "are unverified: design §3.2 makes the proxy "
-                             "authoritative,", C.A_DIM)
-            self._put(11, 3, "not the adapter.", C.A_DIM)
+            self._put(3, 3, "no proxy log for this run.", C.A_DIM)
+            self._put(5, 3, "The proxy now runs by default and writes "
+                            "alongside the results — runs/probe.jsonl "
+                            "pairs with", C.A_DIM)
+            self._put(6, 3, "runs/probe.proxy.jsonl, which this view finds "
+                            "on its own. A run started before that change, "
+                            "or one", C.A_DIM)
+            self._put(7, 3, "started with ADH_NO_PROXY=1, has no log to "
+                            "find.", C.A_DIM)
+            self._put(9, 3, "Without it the adapter's token counts are "
+                            "unverified: design §3.2 makes the proxy "
+                            "authoritative,", C.A_DIM)
+            self._put(10, 3, "not the adapter, and the 2% H4 agreement "
+                             "gate has nothing to compare.", C.A_DIM)
             return 0, 0
         cal = sd.calibration(self.rows, self.proxy_rows)
         if not cal:
@@ -588,23 +703,50 @@ class SuiteTui(TuiApp):
                         f"{c['model']} · {c['adapter']}", C.A_BOLD)
         arm_name, arm_role = sd.ARMS.get(c["arm"], ("?", ""))
         self._put(4, 1, f"arm {c['arm']} — {arm_name}: {arm_role}", C.A_DIM)
+        self._put(6, 3, f"{'':<26}{'median':>14}{'mean':>14}{'p90':>14}"
+                        f"{'p90/med':>10}", C.A_DIM)
+        # median, mean and p90 side by side. The analysis compares medians;
+        # the p90 column is what says whether the median is representative,
+        # and the ratio is the fastest way to see a cell whose tail is
+        # carrying the cost.
+        dist = [
+            ("tok_in", c["tok"], c["avg_tok"], c["p90_tok"], "{:,.0f}"),
+            ("calls", c["calls"], c["avg_calls"], c["p90_calls"], "{:,.1f}"),
+            ("tool calls", c["tools"], c["avg_tools"], c["p90_tools"],
+             "{:,.1f}"),
+            ("probes to first edit", c["probes"], c["avg_probes"],
+             c["p90_probes"], "{:,.1f}"),
+            ("duration s", c["dur_s"], c["avg_dur"], c["p90_dur"], "{:,.0f}"),
+        ]
+        y = 7
+        for name, med, avg, p90, fmt in dist:
+            ratio = (p90 / med) if med else 0
+            self._put(y, 3, f"{name:<26}", C.A_DIM)
+            self._put(y, 29, f"{fmt.format(med):>14}")
+            self._put(y, 43, f"{fmt.format(avg):>14}", C.A_DIM)
+            self._put(y, 57, f"{fmt.format(p90):>14}",
+                      C.color_pair(4) if ratio >= 2 else 0)
+            self._put(y, 71, f"{ratio:>9.1f}x" if ratio else f"{'—':>10}",
+                      C.color_pair(4) if ratio >= 2 else C.A_DIM)
+            y += 1
+        y += 1
         lines = [
             ("trials", f"{c['trials']}"),
             ("pass@1", f"{c['pass_rate']:.0f}%  (± {c['spread']:.0f})"),
-            ("median tok_in", f"{c['tok']:,.0f}"),
             ("median tok_in | passed", f"{c['tok_won']:,.0f}"),
-            ("median calls", f"{c['calls']:.0f}"),
-            ("probes to first edit", f"{c['probes']:.0f}"),
+            ("ungradeable (harness)", f"{c['ungradeable']}/{c['trials']}"),
             ("redundant reads", f"{c['redundant']:.0f}"),
-            ("subagent calls", f"{c['subagent_calls']}"),
+            ("subagents dispatched", f"{c['n_subagents']:.0f} "
+                                     f"(median), {c['subagent_calls']} "
+                                     f"child calls total"),
+            ("subagent tok_in", f"{c['subagent_tok']:,.0f} (median)"),
             ("abandoned trials", f"{c['abandoned']}/{c['trials']}"),
-            ("median duration", sd.fmt_duration(c["dur_s"])),
             ("failing checks", ", ".join(c["fails"]) or "—"),
         ]
         for i, (k, v) in enumerate(lines):
-            self._put(6 + i, 3, f"{k:<26}", C.A_DIM)
-            self._put(6 + i, 29, v)
-        y = 6 + len(lines) + 1
+            self._put(y + i, 3, f"{k:<26}", C.A_DIM)
+            self._put(y + i, 29, v)
+        y = y + len(lines) + 1
         self._put(y, 1, "per-trial", C.A_DIM)
         for i, r in enumerate(c["rows"][:max(0, max_y - y - 4)]):
             m = r.get("metrics") or {}
@@ -763,6 +905,9 @@ def main():
     # of a run that just started, and watching it fill is the whole reason
     # to point the viewer at one. Only the unscoped case -- nothing named,
     # nothing on disk -- is a "you have not run anything yet" error.
+    # Find the run's own proxy log rather than making someone name it.
+    if not proxy:
+        proxy = sd.paired_proxy_log(files) or None
     if not files and not sd.load_rows():
         print("no results found — run the suite first "
               "(make all), or pass FILES=<results.jsonl>", file=sys.stderr)

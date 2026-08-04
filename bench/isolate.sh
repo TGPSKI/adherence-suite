@@ -27,6 +27,32 @@ ROOT="$(cd "$HERE/.." && pwd)"
 BENCH_XDG="${ADH_BENCH_XDG:-$HERE/.xdg}"
 PORT="${ADH_PROXY_PORT:-8010}"
 
+# The proxy records the tokens and round trips this suite exists to
+# measure, and design §3.2 makes it AUTHORITATIVE over the adapter -- so
+# it runs by default. It used to be opt-in behind ADH_PROXY_LOG, which
+# meant the ordinary path produced numbers nothing had verified and the
+# H4 agreement gate could not be checked at all for the run you were
+# actually doing.
+#
+# The log is paired to the results file rather than shared, so a proxy log
+# always belongs to exactly one run: runs/probe.jsonl -> runs/probe.proxy.jsonl.
+# ADH_NO_PROXY=1 opts out (no endpoint, or deliberately measuring the
+# adapter alone).
+if [ -z "${ADH_PROXY_LOG:-}" ] && [ "${ADH_NO_PROXY:-0}" != "1" ]; then
+  _out=""
+  _next=0
+  for _a in "$@"; do
+    if [ "$_next" = "1" ]; then _out="$_a"; _next=0; fi
+    if [ "$_a" = "--out" ]; then _next=1; fi
+  done
+  if [ -n "$_out" ]; then
+    ADH_PROXY_LOG="${_out%.jsonl}.proxy.jsonl"
+  else
+    ADH_PROXY_LOG="$ROOT/runs/proxy.jsonl"
+  fi
+  export ADH_PROXY_LOG
+fi
+
 mkdir -p "$BENCH_XDG/opencode"
 cp "$HERE/opencode-bench.json" "$BENCH_XDG/opencode/opencode.json"
 

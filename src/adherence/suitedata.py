@@ -87,6 +87,9 @@ def load_rows(paths=None):
                     r.setdefault("arm", "-")
                     r.setdefault("metrics", {})
                     r["_src"] = os.path.basename(p)
+                    # File order is arrival order for an append-only log,
+                    # which is the only "most recent" a viewer can know.
+                    r["_seq"] = len(rows)
                     rows.append(r)
         except (OSError, json.JSONDecodeError):
             continue
@@ -103,6 +106,29 @@ def newest_mtime(paths=None):
 def _med(vals):
     vals = [v for v in vals if v is not None]
     return st.median(vals) if vals else 0
+
+
+def _avg(vals):
+    vals = [v for v in vals if v is not None]
+    return sum(vals) / len(vals) if vals else 0
+
+
+def _p90(vals):
+    """90th percentile, nearest-rank.
+
+    Reported next to the median rather than instead of it. A cost
+    comparison is made on medians because between-scenario variance is
+    enormous, but a median hides the runs that actually hurt: the trial
+    that explored for forty calls, the one that timed out. The gap between
+    the two is the thing to look at -- a treatment that halves the median
+    and doubles the tail has not made anything cheaper."""
+    vals = sorted(v for v in vals if v is not None)
+    if not vals:
+        return 0
+    # Nearest-rank, not interpolation: with 5-7 trials per cell an
+    # interpolated p90 invents a value no trial produced.
+    k = max(1, math.ceil(0.9 * len(vals)))
+    return vals[k - 1]
 
 
 def load_cells(paths=None, pattern=None):
@@ -148,6 +174,33 @@ def load_cells(paths=None, pattern=None):
             "dur_s": _med([r.get("duration_s", 0) for r in rs]),
             "fails": fails,
             "rows": rs,
+            # Averages and tails, alongside the medians above. The median
+            # is what the analysis compares; the p90 is what says whether
+            # the median is telling the whole story.
+            "avg_tok": _avg(toks),
+            "p90_tok": _p90(toks),
+            "avg_calls": _avg(calls),
+            "p90_calls": _p90(calls),
+            "avg_dur": _avg([r.get("duration_s", 0) for r in rs]),
+            "p90_dur": _p90([r.get("duration_s", 0) for r in rs]),
+            "tools": _med([(r["metrics"] or {}).get("tool_calls", 0)
+                           for r in rs]),
+            "avg_tools": _avg([(r["metrics"] or {}).get("tool_calls", 0)
+                               for r in rs]),
+            "p90_tools": _p90([(r["metrics"] or {}).get("tool_calls", 0)
+                               for r in rs]),
+            "avg_probes": _avg([(r["metrics"] or {}).get(
+                "probes_to_first_edit", 0) for r in rs]),
+            "p90_probes": _p90([(r["metrics"] or {}).get(
+                "probes_to_first_edit", 0) for r in rs]),
+            "n_subagents": _med([(r["metrics"] or {}).get("n_subagents", 0)
+                                 for r in rs]),
+            "subagent_tok": _med([(r["metrics"] or {}).get("subagent_tok_in", 0)
+                                  for r in rs]),
+            "ungradeable": sum(1 for r in rs
+                               if any(c.get("name") == "adapter"
+                                      and c.get("status") != "pass"
+                                      for c in r["checks"])),
         })
     cells.sort(key=lambda c: (c["arm"], c["scenario"]))
     if pattern:
@@ -244,6 +297,20 @@ def pareto_front(cells, cost="ktok", quality="pass_rate"):
 
 
 # ---------- proxy / calibration ----------
+
+def paired_proxy_log(paths):
+    """The proxy log belonging to these results, if one exists.
+
+    isolate.sh writes runs/probe.jsonl -> runs/probe.proxy.jsonl, so the
+    pairing is derivable and the viewer should not need to be told. Asking
+    the user to pass --proxy for a file the harness just wrote next to the
+    results is the kind of step that guarantees the H4 tab stays empty."""
+    for p in paths or []:
+        cand = p[:-len(".jsonl")] + ".proxy.jsonl" if p.endswith(".jsonl") else ""
+        if cand and os.path.exists(cand):
+            return cand
+    return ""
+
 
 def load_proxy(path):
     rows = []
