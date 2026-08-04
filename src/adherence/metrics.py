@@ -323,13 +323,33 @@ def proxy_totals(rows: list[dict]) -> dict:
 
 
 def split_by_mark(rows: list[dict]) -> dict:
-    """Group proxy records by the trial mark the runner wrote before each
-    trial. Records before any mark land under ''."""
+    """Group proxy records by trial.
+
+    Two mechanisms, and the per-record one wins wherever it is present:
+
+    `run_id` is carried on the request path, so it is correct no matter how
+    many trials are in flight. `mark` is a single piece of proxy state set
+    between trials -- fine serially, meaningless under --jobs>1, where two
+    trials interleave into whichever label was set last.
+
+    Records with neither land under ''."""
     out, cur = {}, ""
     for r in rows:
         if r.get("type") == "mark":
             cur = r.get("label", "")
             out.setdefault(cur, [])
             continue
-        out.setdefault(cur, []).append(r)
+        key = trial_key(r.get("run_id") or r.get("mark") or cur)
+        out.setdefault(key, []).append(r)
     return out
+
+
+def trial_key(run_id: str) -> str:
+    """`scenario|arm|trial`, the unit a result row is joined on.
+
+    A run id carries a fourth field so two out-dirs for the same trial
+    (a retry, a re-run) stay distinct as processes. Calibration joins on
+    the trial, so the suffix is dropped here rather than at every call
+    site that would otherwise have to know about it."""
+    parts = (run_id or "").split("|")
+    return "|".join(parts[:3]) if len(parts) >= 3 else (run_id or "")

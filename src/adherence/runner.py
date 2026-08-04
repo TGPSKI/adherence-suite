@@ -274,6 +274,49 @@ def install_reapers() -> None:
                 signal.signal(sig, _reap_all)
 
 
+def per_trial_bench_config(out_dir: Path, run_id: str) -> Path | None:
+    """A copy of the harness config whose baseURL names this trial.
+
+    The proxy is authoritative for token counts (H4), but it could only
+    attribute calls to a trial via a single global mark -- so under
+    --jobs>1 the runner skipped marking entirely rather than write an
+    attribution it knew was wrong, and the gate could not be measured in
+    parallel at all. That was a real limitation of the design, recorded as
+    "the second cost of parallelism".
+
+    It does not have to be. Nothing in an inference request body identifies
+    its trial, but the request *path* is ours: routing this trial through
+    `<proxy>/__run/<run_id>/v1` makes attribution arrive with the call.
+    The proxy strips the prefix before forwarding, so upstream sees exactly
+    what it saw before.
+
+    Returns None when no proxy is in use, leaving the adapter on whatever
+    config it would otherwise have picked."""
+    base = os.environ.get("ADH_PROXY")
+    src = os.environ.get("ADH_BENCH_CONFIG") or str(ROOT / "bench" /
+                                                    "opencode-bench.json")
+    if not base or not Path(src).is_file():
+        return None
+    try:
+        cfg = json.loads(Path(src).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    root = base.rsplit("/v1", 1)[0].rstrip("/")
+    tagged = f"{root}/__run/{urllib.parse.quote(run_id, safe='')}/v1"
+    changed = False
+    for prov in (cfg.get("provider") or {}).values():
+        opts = prov.get("options") if isinstance(prov, dict) else None
+        if isinstance(opts, dict) and opts.get("baseURL"):
+            opts["baseURL"] = tagged
+            changed = True
+    if not changed:
+        return None
+    dest = out_dir / "opencode-bench.json"
+    dest.write_text(json.dumps(cfg, indent=2))
+    return dest
+
+
 def wait_or_kill(proc, out_dir: Path, hard_s: int, idle_s: int):
     """Wait for the adapter, killing it only for a reason worth killing for.
 
@@ -645,6 +688,9 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
     # start_new_session puts the adapter in its own process group so a
     # deadline can kill everything it spawned. See kill_process_group.
     env["ADH_RUN_ID"] = run_id
+    cfg = per_trial_bench_config(out_dir, run_id)
+    if cfg:
+        env["ADH_BENCH_CONFIG"] = str(cfg)
     proc = subprocess.Popen(
         [str(adapter), str(sandbox), model, str(prompt_file), str(out_dir),
          target_agent],
@@ -844,9 +890,11 @@ def main():
               + (f"  [out_dir={r['out_dir']}]" if r.get("out_dir") else ""))
 
     if args.jobs > 1 and os.environ.get("ADH_PROXY"):
-        print("WARNING: --jobs>1 with a recording proxy — per-trial proxy "
-              "attribution is unavailable and trial marks are skipped. Run "
-              "the H4 calibration serially.", file=sys.stderr)
+        print("note: --jobs>1 with a recording proxy. Trial marks are "
+              "skipped (they are one piece of shared state and two trials "
+              "would interleave), but each trial routes through its own "
+              "/__run/<id> path, so per-trial attribution is exact and the "
+              "H4 gate is measurable in parallel.", file=sys.stderr)
 
     install_reapers()
     with open(args.out, "a") as out:

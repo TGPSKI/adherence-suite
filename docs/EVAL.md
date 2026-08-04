@@ -429,18 +429,25 @@ absent entirely on some runs. Real spend, but not attributable to the
 instruction surface, so they are excluded from arm comparisons and reported
 separately. Stating the rule beats quietly picking a total.
 
-## Two costs of parallelism
+## The cost of parallelism
 
-`--jobs > 1` buys throughput and spends two things:
+`--jobs > 1` buys throughput and spends one thing:
 
 - **Wall-clock stops being comparable across arms.** Latency becomes a function
   of GPU scheduling. Contended runs are stamped `contended: true` rather than
   left to be compared against serial ones later.
-- **Per-trial proxy attribution becomes impossible.** The proxy mark is one
-  piece of state and *nothing in an inference request identifies the trial* —
-  measured: the sandbox path appears nowhere in the request body, not even in
-  the system prompt. The runner skips marks and warns rather than writing an
-  attribution that is wrong. **Calibration runs serially.**
+
+~~**Per-trial proxy attribution becomes impossible.**~~ This was recorded as the
+second cost and it was not a cost, it was a missing key. The premise was right —
+*nothing in an inference request body identifies its trial*, measured: the
+sandbox path appears nowhere in it, not even in the system prompt — but the
+request **path** is ours. Each trial now routes through
+`<proxy>/__run/<run_id>/v1`, the proxy strips the prefix before forwarding, and
+attribution arrives with the call instead of being read off one piece of shared
+state that two concurrent trials would fight over. The H4 gate is measurable at
+any `--jobs`. Verified in the selftest by driving two trials at one proxy
+concurrently and asserting no call lands in the wrong bucket, and that upstream
+never sees the prefix.
 
 Concurrent `opencode run` against one `XDG_DATA_HOME` also dies with `database
 is locked`, so each parallel trial gets its own data home.

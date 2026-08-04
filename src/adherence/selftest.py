@@ -722,6 +722,107 @@ def check_process_hygiene() -> list[str]:
     return problems
 
 
+def check_proxy_attribution() -> list[str]:
+    """The H4 gate must be measurable with trials running concurrently.
+
+    The proxy could only attribute a call to a trial through one global
+    mark, so under --jobs>1 the runner skipped marking rather than write an
+    attribution it knew was wrong -- and the gate, which decides whether
+    any cost number in this suite can be trusted, was simply unavailable
+    for every parallel run. The registration called that "the second cost
+    of parallelism".
+
+    It is not a cost, it is a missing key. Each trial now routes through
+    `<proxy>/__run/<run_id>/v1`, so attribution arrives with the request.
+    This drives two trials at one proxy concurrently and asserts no call
+    lands in the wrong bucket -- and that upstream never sees the prefix,
+    because a proxy that alters the request is not measuring it."""
+    import json as _json
+    import tempfile as _tf
+    import threading as _th
+    import urllib.request as _ur
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path as _P
+
+    from adherence import metrics as _M
+    from adherence import proxy as _px
+    problems = []
+    seen_paths = set()
+
+    class Up(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            seen_paths.add(self.path)
+            n = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(n)
+            time.sleep(0.05)              # force the requests to overlap
+            body = _json.dumps({
+                "choices": [{"message": {"content": "ok"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 5,
+                          "total_tokens": 105}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    up = ThreadingHTTPServer(("127.0.0.1", 0), Up)
+    _th.Thread(target=up.serve_forever, daemon=True).start()
+    tmp = _tf.mkdtemp(prefix="self-proxy-")
+    log = _P(tmp) / "proxy.jsonl"
+    _px.Handler.recorder = _px.Recorder(str(log))
+    _px.Handler.upstream = f"http://127.0.0.1:{up.server_address[1]}"
+    px = ThreadingHTTPServer(("127.0.0.1", 0), _px.Handler)
+    _th.Thread(target=px.serve_forever, daemon=True).start()
+    port = px.server_address[1]
+
+    def fire(run_id, n):
+        for _ in range(n):
+            req = _ur.Request(
+                f"http://127.0.0.1:{port}/__run/{run_id}/v1/chat/completions",
+                data=_json.dumps({"model": "m", "messages": [],
+                                  # tools present, or is_auxiliary() would
+                                  # class these as title-generation overhead
+                                  "tools": [{"type": "function"}]}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            _ur.urlopen(req, timeout=30).read()
+
+    try:
+        a, b = "s01|a1|0|aaa", "s02|a3|2|bbb"
+        ts = [_th.Thread(target=fire, args=(a, 4)),
+              _th.Thread(target=fire, args=(b, 6))]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+
+        rows = [_json.loads(x) for x in log.read_text().splitlines() if x.strip()]
+        groups = _M.split_by_mark(rows)
+        for key, want in (("s01|a1|0", 4), ("s02|a3|2", 6)):
+            got = len(groups.get(key, []))
+            if got != want:
+                problems.append(
+                    f"{key} got {got} of {want} calls; concurrent trials "
+                    f"cross-attributed, which is what the single global "
+                    f"mark did and the whole point of the run id")
+        tot = _M.proxy_totals(groups.get("s01|a1|0", []))
+        if tot["tok_in_billed"] != 400:
+            problems.append(f"tok_in_billed {tot['tok_in_billed']}, expected "
+                            f"400 -- usage is not surviving attribution")
+        if seen_paths != {"/v1/chat/completions"}:
+            problems.append(f"upstream saw {seen_paths}; the routing prefix "
+                            f"must be stripped, or the proxy is altering "
+                            f"the request it claims to be measuring")
+    finally:
+        px.shutdown()
+        up.shutdown()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return problems
+
+
 def check_analysis() -> list[str]:
     """The pre-specified analysis (docs/EVAL.md) must detect a planted
     effect, stay silent when there is none, and REFUSE when a precondition
@@ -834,6 +935,7 @@ CHECKS = (
     ("harness fault is not a model failure", check_harness_exclusion),
     ("live run reader", check_live),
     ("process hygiene", check_process_hygiene),
+    ("proxy attribution under concurrency", check_proxy_attribution),
     ("pre-specified analysis", check_analysis),
     ("stdlib test runner", check_test_runner),
     ("fixture noise filter", check_noise_filter),

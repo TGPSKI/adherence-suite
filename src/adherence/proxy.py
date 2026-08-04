@@ -33,6 +33,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -64,7 +65,12 @@ class Recorder:
             self.seq += 1
             rec["type"] = "call"
             rec["seq"] = seq
-            rec["mark"] = self.current_mark
+            # A run id carried on the request path beats the global mark and
+            # is the only one of the two that survives concurrency: the mark
+            # is one piece of shared state, so two trials in flight write
+            # into whichever label happened to be set last. `mark` stays for
+            # serial runs and for reading old logs.
+            rec.setdefault("mark", self.current_mark)
             self._write(rec)
             return seq
 
@@ -134,6 +140,28 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- control plane -------------------------------------------------
 
+    def _split_run(self) -> str:
+        """Pull a `/__run/<id>` prefix off the request path.
+
+        This is how a trial identifies itself under --jobs>1. The runner
+        gives each trial a provider baseURL carrying its own run id, so the
+        attribution arrives with the request instead of being inferred from
+        proxy state that two concurrent trials would fight over. Nothing in
+        an inference request body identifies its trial -- measured; the
+        sandbox path is not even in the system prompt -- so the path is the
+        only place left to put it.
+
+        Returns the id and rewrites self.path to what upstream should see.
+        """
+        if not self.path.startswith("/__run/"):
+            return ""
+        rest = self.path[len("/__run/"):]
+        rid, sep, tail = rest.partition("/")
+        if not sep:
+            return ""
+        self.path = "/" + tail
+        return urllib.parse.unquote(rid)
+
     def _control(self, body: bytes) -> bool:
         if not self.path.startswith("/__proxy/"):
             return False
@@ -177,6 +205,9 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(n) if n else b""
         if self._control(body):
             return
+        # Strip before anything reads self.path: upstream must never see
+        # the routing prefix, and every record below should carry the id.
+        run_id = self._split_run()
 
         parsed, fp = None, {}
         if body:
@@ -213,6 +244,7 @@ class Handler(BaseHTTPRequestHandler):
             resp, status = e, e.code
         except Exception as e:                       # upstream down/refused
             self.recorder.record({**fp, "status": 0, "error": str(e),
+                                  **({"mark": run_id} if run_id else {}),
                                   "duration_ms": int((time.time() - t0) * 1000)})
             self._json(502, {"error": f"proxy upstream: {e}"})
             return
@@ -226,6 +258,9 @@ class Handler(BaseHTTPRequestHandler):
         rec = {**fp, "status": status, "path": self.path,
                "duration_ms": int((time.time() - t0) * 1000),
                "finish_reason": finish}
+        if run_id:
+            rec["mark"] = run_id
+            rec["run_id"] = run_id
         rec.update(usage or {"input_tokens": 0, "output_tokens": 0,
                              "total_tokens": 0, "cached_tokens": 0,
                              "usage_missing": True})
