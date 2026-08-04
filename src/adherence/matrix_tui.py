@@ -155,6 +155,35 @@ class SuiteTui(TuiApp):
 
     # ---- data ------------------------------------------------------------
 
+    def per_cell(self, cells) -> int:
+        """Trials each cell will run, for the `left` and `eta` columns.
+
+        Read from the batch's own recorded argv, because the runner already
+        wrote down how it was launched and a second opinion can only drift
+        from it.
+
+        It used to be `expect / len(cells)`, which is wrong in a way that
+        only shows up mid-run: the denominator is cells that have PRODUCED a
+        row, not cells the suite will run. Measured at 86/120, eighteen
+        cells had reported against an expected 120, so it concluded 7 trials
+        per cell -- and every finished 5-trial cell claimed 2 still to go,
+        with an eta attached to work that was already done. The estimate
+        only converges once the last scenario starts, which is exactly when
+        nobody needs it.
+
+        Falls back to the fullest cell observed: never an overestimate, so
+        `left` can read low early but never invents remaining work."""
+        for r in reversed(self.rows):
+            argv = ((r.get("provenance") or {}).get("argv")) or []
+            for i, a in enumerate(argv):
+                if a == "--trials" and i + 1 < len(argv):
+                    try:
+                        return max(1, int(argv[i + 1]))
+                    except (TypeError, ValueError):
+                        break
+            break            # newest row is enough; one batch, one argv
+        return max((c["trials"] for c in cells), default=0)
+
     def reload(self):
         self.cells = sd.load_cells(paths=self.files)
         self.rows = sd.load_rows(self.files)
@@ -594,10 +623,7 @@ class SuiteTui(TuiApp):
                             f"{'calls':>7}{'tools':>7}{'sub':>5}{'abnd':>6}"
                             f"{'med dur':>9}{'left':>5}{'eta':>8}", C.A_DIM)
             y += 1
-            # Trials per cell, from the batch size when it is known.
-            per_cell = 0
-            if self.expect and cells:
-                per_cell = max(1, round(self.expect / max(1, len(cells))))
+            per_cell = self.per_cell(cells)
             self.sum_cursor = max(0, min(self.sum_cursor, len(cells) - 1))
             rows_s = max(1, min(len(cells), self.sum_budget))
             if self.sum_cursor < self.sum_scroll:
@@ -964,12 +990,17 @@ class SuiteTui(TuiApp):
         """Per-(arm, scenario) cells in the order the table shows them."""
         cs = sd.load_cells(paths=self.files)
         mode = SUM_SORTS[self.sum_sort]
+        pc = self.per_cell(cs)
         keys = {
             "tag": lambda c: c["tag"],
             "pass": lambda c: (c["pass_rate"], c["tag"]),
             "tok": lambda c: c["tok"],
             "dur": lambda c: c["dur_s"],
-            "left": lambda c: c["dur_s"] * c["trials"],
+            # The eta the column actually shows. It used to be
+            # `dur_s * trials` -- time already SPENT -- so sorting by `left`
+            # ranked finished-and-slow cells above ones with trials still to
+            # run, which is the opposite of what the column is for.
+            "left": lambda c: (max(0, pc - c["trials"]) * c["dur_s"], c["tag"]),
         }
         return sorted(cs, key=keys[mode], reverse=self.sum_desc)
 
