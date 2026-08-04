@@ -934,10 +934,23 @@ def main():
             # Threads, not processes: every trial is dominated by waiting
             # on a subprocess and on the endpoint, so the GIL is not the
             # constraint and the shared output file needs no IPC.
-            from concurrent.futures import ThreadPoolExecutor
+            from concurrent.futures import ThreadPoolExecutor, as_completed
             lock = threading.Lock()
             with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-                for item, r, errs in pool.map(one, work):
+                futures = [pool.submit(one, it) for it in work]
+                # as_completed, NOT map: map yields in SUBMISSION order, so
+                # one slow trial buffers every later result inside the
+                # executor. Observed on the probe -- a trial finished, its
+                # out-dir was cleaned up, and its row stayed unwritten
+                # behind two 20-minute runs: invisible to the live view,
+                # missing from the progress count, and lost outright if the
+                # runner were killed. A finished trial is written now.
+                for fut in as_completed(futures):
+                    try:
+                        item, r, errs = fut.result()
+                    except Exception as e:          # noqa: BLE001
+                        print(f"  trial raised: {e}", file=sys.stderr)
+                        continue
                     with lock:
                         emit(out, item, r, errs)
         else:
