@@ -4,13 +4,21 @@
   "enforcement": "active",
   "conditions": {
     "ref_name": {
-      "include": ["refs/tags/prereg/**"],
+      "include": [
+        "refs/tags/prereg-*"
+      ],
       "exclude": []
     }
   },
   "rules": [
-    { "type": "update" },
-    { "type": "deletion" },
-    { "type": "required_signatures" }
+    {
+      "type": "update"
+    },
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "required_signatures"
+    }
   ]
 }

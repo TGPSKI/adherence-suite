@@ -21,8 +21,8 @@ carries over.
 
 ## Registration
 
-**Registered 2026-08-04** at tag `prereg/directed-contexts/v1`, on a repository
-whose committed ruleset makes `prereg/*` tags immutable and signature-required.
+**Registered 2026-08-04** at tag `prereg-directed-contexts-v1`, on a repository
+whose committed ruleset makes `prereg-*` tags immutable and signature-required.
 Nothing below was written with results in hand, because there are none.
 
 What is frozen by that tag: the falsifiers and their thresholds, the primary
