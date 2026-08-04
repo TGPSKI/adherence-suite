@@ -31,6 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   currently deduced; only the four contradicted premises are induced.
 - **A2 runs at both section orderings.** `--seed 0` now preserves the source
   order instead of shuffling.
+- **`adherence.mkpr`** (`make mkpr`) — turns merged PRs into scenarios and
+  **proves each is gradeable before any model runs**: the PR's own tests must
+  fail at the parent commit and pass with the real fix. Pure git and compiler,
+  no GPU. Paths are stripped from prompts, prompts that still leak a path are
+  dropped, and every drop is logged with its reason. This is what makes the
+  feasibility question answerable before the expensive work, not after it.
 
 - `make ci-local` — extracts CI's own `run:` blocks from the workflow file and
   executes them under the shell GitHub uses. Added after two broken steps

@@ -16,7 +16,7 @@ RUNNER   = $(PYTHON) -m adherence.runner --adapter $(ADAPTER) --model $(MODEL) \
              --trials $(TRIALS) $(ARMFLAGS) --out $(OUT)
 
 .PHONY: help check ci-local compile selftest schema lint table matrix report \
-	analyze calibrate screen run all clean
+	analyze calibrate screen mkpr run all clean
 
 help:
 	@printf '%s\n' \
@@ -38,6 +38,7 @@ help:
 		'  make run S=s05             one scenario' \
 		'  make all                   the full suite' \
 		'  make screen                score candidate fixture repos (needs gh)' \
+		'  make mkpr REPO= MIRROR= SINCE=  merged PRs -> scenarios, gradeability proven' \
 		'' \
 		'variables:' \
 		'  MODEL    <provider>/<model>; provider is a key in bench/opencode-bench.json' \
@@ -90,6 +91,13 @@ calibrate:
 
 screen:
 	$(PY) -m adherence.screen_repos
+
+## Extract merged PRs into scenarios and prove each is gradeable (no model)
+mkpr:
+	@test -n "$(REPO)" -a -n "$(MIRROR)" -a -n "$(SINCE)" || { \
+		echo 'usage: make mkpr REPO=owner/name MIRROR=fixtures/x.git SINCE=YYYY-MM-DD OUT=scenarios/x'; exit 1; }
+	$(PY) -m adherence.mkpr --repo $(REPO) --mirror $(MIRROR) --since $(SINCE) \
+		$(if $(UNTIL),--until $(UNTIL),) --out $(or $(OUT),scenarios/$(notdir $(REPO))) $(if $(LIMIT),--limit $(LIMIT),)
 
 # --- runs ---
 
