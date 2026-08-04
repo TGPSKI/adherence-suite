@@ -64,6 +64,7 @@ class SuiteTui(TuiApp):
         self.rows = []
         self.live = []
         self.live_cursor = 0
+        self.live_sel = ""   # out_dir the cursor is anchored to
         self.proxy_rows = []
         self.stamp = 0.0
         self.seen_mtime = 0.0
@@ -99,6 +100,31 @@ class SuiteTui(TuiApp):
             self.live = lv.snapshot()
         except Exception:
             self.live = []
+        # Re-anchor to the run the cursor was on. Trials finish and new ones
+        # start on every tick, so a positional cursor points at a different
+        # trial each time the list changes length -- worst in the detail
+        # pane, which would swap out from under you mid-read. out_dir is
+        # unique and outlives the run, so it is the identity to hold.
+        if self.live_sel:
+            idx = next((i for i, r in enumerate(self.live)
+                        if r["out_dir"] == self.live_sel), None)
+            if idx is not None:
+                self.live_cursor = idx
+            elif self.live:
+                # The selected run ended. Stay in range and re-anchor
+                # rather than silently tracking whatever slid into its slot.
+                self.live_cursor = min(self.live_cursor, len(self.live) - 1)
+                self.live_sel = self.live[self.live_cursor]["out_dir"]
+        if not self.live_sel and self.live:
+            self.live_sel = self.live[min(self.live_cursor,
+                                          len(self.live) - 1)]["out_dir"]
+
+    def _anchor_live(self):
+        """Pin the selection to a run, not to a row number."""
+        if self.live:
+            self.live_cursor = max(0, min(self.live_cursor,
+                                          len(self.live) - 1))
+            self.live_sel = self.live[self.live_cursor]["out_dir"]
 
     def visible(self):
         cs = [c for c in self.cells if sd.matches(c["tag"], self.pattern)]
@@ -675,12 +701,14 @@ class SuiteTui(TuiApp):
         elif key in (ord("j"), C.KEY_DOWN):
             if VIEWS[self.view] == "live":
                 self.live_cursor += 1
+                self._anchor_live()
             else:
                 self.cursor += 1
                 self.scroll += 1
         elif key in (ord("k"), C.KEY_UP):
             if VIEWS[self.view] == "live":
                 self.live_cursor = max(0, self.live_cursor - 1)
+                self._anchor_live()
             else:
                 self.cursor = max(0, self.cursor - 1)
                 self.scroll = max(0, self.scroll - 1)

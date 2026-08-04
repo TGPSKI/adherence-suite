@@ -262,7 +262,13 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
             "info": _scenario_info(m.get("scenario", ""), root),
             **st,
         })
-    runs.sort(key=lambda r: (r["state"] != "running", r["idle_s"]))
+    # Stable ordering. Sorting by activity (state, then idle time) put the
+    # busiest run on top, which reads well and is unusable: idle_s changes
+    # every second, so rows reorder under the cursor and a detail pane
+    # silently swaps to a different trial while you are reading it.
+    # Identity, not liveness, decides position.
+    runs.sort(key=lambda r: (r["scenario"], r["arm"], r["trial"],
+                             r["out_dir"]))
     return runs
 
 
