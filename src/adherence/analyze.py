@@ -37,6 +37,12 @@ import random
 import statistics as st
 import sys
 
+# A cluster bootstrap resamples scenarios, so it needs scenarios. Below
+# this the CI is nan and any verdict derived from it is a verdict from a
+# test that never ran -- the single failure mode this whole design exists
+# to prevent. F1 already guarded on it; F3 and F6 did not, and reported
+# TRIPPED off nan on a one-scenario run.
+MIN_PAIRED = 4
 BOOTSTRAP_N = 10_000
 BOOTSTRAP_SEED = 20260804          # fixed here, not chosen at analysis time
 ALPHA = 0.05
@@ -226,13 +232,21 @@ def evaluate(rows) -> dict:
         record("F3", "NOT TESTABLE", f"needs {TREATMENT} and {CONTENT_MATCHED}")
     else:
         lrs, dropped = paired_log_ratios(rows, TREATMENT, CONTENT_MATCHED, "calls", True)
-        pt, lo, hi = bootstrap_ci([x for _, x in lrs])
-        pv = p_from_ci([x for _, x in lrs])
-        ratio = math.exp(pt)
-        tripped = not (ratio < 1.0 and hi < 0)
-        record("F3", "TRIPPED" if tripped else "not tripped",
-               f"calls {ratio:.3f}x vs {CONTENT_MATCHED} "
-               f"(95% CI {math.exp(lo):.3f}-{math.exp(hi):.3f}, k={len(lrs)})", pv)
+        if len(lrs) < MIN_PAIRED:
+            record("F3", "NOT TESTABLE",
+                   f"only {len(lrs)} scenario(s) paired; a cluster bootstrap "
+                   f"over scenarios needs at least {MIN_PAIRED}. Trials within "
+                   f"one scenario are not independent and cannot stand in "
+                   f"for scenarios")
+        else:
+            pt, lo, hi = bootstrap_ci([x for _, x in lrs])
+            pv = p_from_ci([x for _, x in lrs])
+            ratio = math.exp(pt)
+            tripped = not (ratio < 1.0 and hi < 0)
+            record("F3", "TRIPPED" if tripped else "not tripped",
+                   f"calls {ratio:.3f}x vs {CONTENT_MATCHED} "
+                   f"(95% CI {math.exp(lo):.3f}-{math.exp(hi):.3f}, "
+                   f"k={len(lrs)})", pv)
 
     # ---- F4: pass rate guardrail ---------------------------------------
     if not {TREATMENT, PRACTICAL} <= arms:
@@ -240,9 +254,13 @@ def evaluate(rows) -> dict:
     else:
         t, r = pass_rate(rows, TREATMENT), pass_rate(rows, PRACTICAL)
         drop = r - t
+        n_scen = len({x["scenario"] for x in rows})
+        note = "" if n_scen >= MIN_PAIRED else (
+            f" -- on {n_scen} scenario(s), so this is a description of one "
+            f"task, not a guardrail verdict")
         record("F4", "TRIPPED" if drop >= 0.10 else "not tripped",
                f"pass rate {t:.2f} vs {r:.2f} ({drop*100:+.1f}pp); "
-               f"registered threshold -10pp")
+               f"registered threshold -10pp{note}")
 
     # ---- F5: interaction with achieved N -------------------------------
     if len(fixtures) < 2:
@@ -259,13 +277,19 @@ def evaluate(rows) -> dict:
         record("F6", "NOT TESTABLE", f"arm {SPAWN} not run")
     else:
         lrs, dropped = paired_log_ratios(rows, SPAWN, CONTENT_MATCHED, "tok_in_billed", True)
-        pt, lo, hi = bootstrap_ci([x for _, x in lrs])
-        pv = p_from_ci([x for _, x in lrs])
-        ratio = math.exp(pt)
-        tripped = not (ratio < 1.0 and hi < 0)
-        record("F6", "TRIPPED" if tripped else "not tripped",
-               f"parent+child total {ratio:.3f}x vs inline "
-               f"{CONTENT_MATCHED} (95% CI {math.exp(lo):.3f}-{math.exp(hi):.3f})", pv)
+        if len(lrs) < MIN_PAIRED:
+            record("F6", "NOT TESTABLE",
+                   f"only {len(lrs)} scenario(s) paired; needs at least "
+                   f"{MIN_PAIRED}")
+        else:
+            pt, lo, hi = bootstrap_ci([x for _, x in lrs])
+            pv = p_from_ci([x for _, x in lrs])
+            ratio = math.exp(pt)
+            tripped = not (ratio < 1.0 and hi < 0)
+            record("F6", "TRIPPED" if tripped else "not tripped",
+                   f"parent+child total {ratio:.3f}x vs inline "
+                   f"{CONTENT_MATCHED} (95% CI {math.exp(lo):.3f}-"
+                   f"{math.exp(hi):.3f}, k={len(lrs)})", pv)
 
     rejected = holm(p)
     for k, v in F.items():

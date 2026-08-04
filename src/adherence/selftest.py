@@ -538,6 +538,16 @@ def check_analysis() -> list[str]:
         problems.append("F1 analysed a set where most marginals are "
                         "non-positive — a mis-measured floor must refuse")
 
+    # A cluster bootstrap over 1 scenario yields nan, and a verdict read
+    # off nan is a verdict from a test that never ran. F3 and F6 reported
+    # TRIPPED that way on a real single-scenario run.
+    one = [r for r in dataset(0.60) if r["scenario"] == "s00"]
+    F1s = analyze.evaluate(one)
+    for fid in ("F3",):
+        if F1s[fid]["verdict"] != "NOT TESTABLE":
+            problems.append(f"{fid} produced a verdict from 1 paired "
+                            f"scenario: {F1s[fid]['verdict']}")
+
     # F5 needs >=2 fixtures. Inferring the fixture from the scenario id
     # made every scenario its own fixture and F5 falsely readable.
     if analyze.evaluate(dataset(0.60))["F5"]["verdict"] != "NOT TESTABLE":
