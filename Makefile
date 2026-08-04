@@ -105,10 +105,18 @@ mkscenarios:
 ## tasks discriminate?" before any of the expensive work.
 probe:
 	@test -n "$(SUITE)" || { echo 'usage: make probe SUITE=suite-pr.yaml [TRIALS=3]'; exit 1; }
+	@test -f "$(SUITE)" || { \
+		echo "no $(SUITE) yet. The probe runs last; build its inputs first:"; \
+		echo "  1. make mkpr REPO=<owner/name> MIRROR=<fixtures/x.git> SINCE=<YYYY-MM-DD> OUT=scenarios-pr/x"; \
+		echo "     -> extracts merged PRs and proves each is gradeable (no GPU)"; \
+		echo "  2. make mkscenarios TASKS=scenarios-pr/x MIRROR=<fixtures/x.git> FIXTURE=x"; \
+		echo "     -> writes the scenario dirs and $(SUITE)"; \
+		echo "  3. make probe SUITE=$(SUITE)"; exit 1; }
+	mkdir -p $(dir $(PROBE_OUT))
 	bench/isolate.sh $(PYTHON) -m adherence.runner --suite $(SUITE) \
 		--adapter $(ADAPTER) --model $(MODEL) --trials $(or $(TRIALS),3) \
-		--arm a1 --out $(or $(OUT),runs/probe.jsonl)
-	@$(PY) -m adherence.probe $(or $(OUT),runs/probe.jsonl)
+		--arm a1 --out $(PROBE_OUT)
+	@$(PY) -m adherence.probe $(PROBE_OUT)
 
 ## Extract merged PRs into scenarios and prove each is gradeable (no model)
 mkpr:
