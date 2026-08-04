@@ -528,6 +528,13 @@ class SuiteTui(TuiApp):
                 self._put(y, 106, f"{lv.fmt_age(eta):>8}" if eta
                           else f"{'—':>8}", C.A_DIM)
                 y += 1
+            if len(cells) > rows_s:
+                self._put(y, 1,
+                          f"  {self.sum_scroll + 1}-"
+                          f"{self.sum_scroll + rows_s} of {len(cells)}"
+                          f"   [j/k] scrolls", C.A_DIM)
+                y += 1
+            y += 1          # separator; the block swap dropped it
         # ---- graded ----------------------------------------------------
         # Newest first: a run in progress is judged by what just landed,
         # not by what landed an hour ago.
