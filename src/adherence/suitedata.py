@@ -37,7 +37,12 @@ from collections import defaultdict
 from adherence import REPO_ROOT
 
 ROOT = str(REPO_ROOT)
-DEFAULT_GLOBS = ("results*.jsonl", "runs/*results*.jsonl")
+# Anything a run wrote, not just files someone remembered to call
+# "results". The viewers exist to be pointed at a run in progress; a glob
+# that misses runs/ab.jsonl makes them useless exactly when they are wanted.
+DEFAULT_GLOBS = ("results*.jsonl", "runs/*.jsonl")
+
+REQUIRED_FIELDS = {"scenario", "checks", "model", "adapter", "trial", "all_pass"}
 
 # design §4. `role` is what each arm is *for*; it is the thing readers of
 # a scoreboard get wrong when it is not written down next to the number.
@@ -70,12 +75,19 @@ def load_rows(paths=None):
             with open(p) as f:
                 for line in f:
                     line = line.strip()
-                    if line:
-                        r = json.loads(line)
-                        r.setdefault("arm", "-")
-                        r.setdefault("metrics", {})
-                        r["_src"] = os.path.basename(p)
-                        rows.append(r)
+                    if not line:
+                        continue
+                    r = json.loads(line)
+                    # runs/ also holds proxy logs, whose lines are calls and
+                    # marks rather than results. Require the fields a cell is
+                    # built from, so a viewer pointed at a run in progress
+                    # skips them instead of crashing on the first one.
+                    if not r.keys() >= REQUIRED_FIELDS:
+                        continue
+                    r.setdefault("arm", "-")
+                    r.setdefault("metrics", {})
+                    r["_src"] = os.path.basename(p)
+                    rows.append(r)
         except (OSError, json.JSONDecodeError):
             continue
     return rows

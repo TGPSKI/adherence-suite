@@ -35,6 +35,7 @@ import argparse
 import json
 import random
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -48,6 +49,33 @@ END = "<!-- mkarms:end {path} -->"
 
 ROUTER_CANDIDATES = ("AGENTS.md", "CLAUDE.md")
 CONTEXT_DIR = ".subagents"
+
+# A generated router announces itself. If the working tree's instruction
+# file is one, then generation has already overwritten whatever the
+# maintainers wrote -- and A1 read from disk would be a file WE authored.
+GENERATED_MARKERS = ("Context Router", "## Context routing", "mkarms:begin")
+
+
+def looks_generated(text: str) -> bool:
+    return any(m in text for m in GENERATED_MARKERS)
+
+
+def recover_a1(repo: Path, ref: str) -> tuple[str, str] | None:
+    """A1 is the maintainers' own file, recovered from git.
+
+    It cannot come from the working tree once contexts have been generated:
+    generation replaces the root instruction file with a router, so reading
+    it from disk yields a file the experimenter wrote. That silently turns
+    the practical control into 'router vs router + contexts' while still
+    being labelled A1, and every A1-vs-A3 number would be wrong in a
+    direction nobody would notice.
+    """
+    for name in ROUTER_CANDIDATES:
+        r = subprocess.run(["git", "show", f"{ref}:{name}"], cwd=repo,
+                           capture_output=True, text=True)
+        if r.returncode == 0 and r.stdout.strip():
+            return name, r.stdout
+    return None
 
 A5_TEMPLATE = """# Agent instructions
 
@@ -91,6 +119,42 @@ def _blocks(repo: Path) -> list[tuple[str, str]]:
     for c in contexts(repo):
         out.append((c.relative_to(repo).as_posix(), _read(c)))
     return out
+
+
+SPAWN_DIRECTIVE = """## How to use this file
+
+1. Read this file.
+2. Identify the task domain from the routing table below.
+3. **Spawn a subagent scoped to that context** and give it the task. Pass
+   the context file path; do not paste its contents into the prompt.
+4. For cross-domain work, spawn one subagent per domain and merge their
+   results here.
+5. Verify the merged result in this session.
+
+Do not load context files into this session. This session routes and
+merges; the subagents do the work.
+"""
+
+
+def spawn_router(router_text: str) -> str:
+    """A4's router: same contexts, delivered by spawn instead of inline.
+
+    The arm exists to measure handoff cost, so the only thing that may
+    differ from A3 is the delivery instruction. Replacing the "How to use
+    this file" block keeps every routing row, every owned path and every
+    universal rule byte-identical to A3."""
+    lines = router_text.splitlines(keepends=True)
+    out, i = [], 0
+    while i < len(lines):
+        if lines[i].startswith("## How to use this file"):
+            out.append(SPAWN_DIRECTIVE)
+            i += 1
+            while i < len(lines) and not lines[i].startswith("## "):
+                i += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    return "".join(out)
 
 
 def build_a2(repo: Path, seed: int) -> str:
@@ -185,7 +249,8 @@ def _write_arm(out_dir: Path, arm: str, files: dict[str, str],
          "note": note}, indent=2) + "\n")
 
 
-def mkarms(repo: Path, out_dir: Path, seed: int) -> dict:
+def mkarms(repo: Path, out_dir: Path, seed: int,
+           a1_ref: str = "") -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     r = router(repo)
     ctxs = contexts(repo)
@@ -198,13 +263,29 @@ def mkarms(repo: Path, out_dir: Path, seed: int) -> dict:
     _write_arm(out_dir, "a0", {}, strip,
                "no instruction file; carries the floor")
 
-    if r:
-        _write_arm(out_dir, "a1", {r.name: _read(r)}, strip,
-                   "recovered verbatim from the repository, not authored")
+    a1 = None
+    if a1_ref:
+        a1 = recover_a1(repo, a1_ref)
+        if a1 is None:
+            raise SystemExit(f"--a1-ref {a1_ref}: no instruction file at that "
+                             f"ref. A1 must be recovered, not authored")
+    elif r and looks_generated(_read(r)):
+        raise SystemExit(
+            f"{r.name} in the working tree is a generated router, so reading "
+            f"A1 from disk would make the practical control a file you wrote. "
+            f"Pass --a1-ref <commit> to recover the maintainers' original "
+            f"(e.g. the fixture's base_commit).")
+    elif r:
+        a1 = (r.name, _read(r))
+
+    if a1:
+        _write_arm(out_dir, "a1", {a1[0]: a1[1]}, strip,
+                   f"recovered verbatim{' from ' + a1_ref if a1_ref else ''}, "
+                   f"not authored")
     else:
         _write_arm(out_dir, "a1", {}, strip,
                    "n/a: repository ships no maintainer instruction file; "
-                   "A0 carries the floor (design §4)")
+                   "A0 carries the floor")
 
     _write_arm(out_dir, "a2", {"AGENTS.md": build_a2(repo, seed)}, strip,
                f"router + {len(ctxs)} contexts concatenated, seed={seed}")
@@ -215,8 +296,16 @@ def mkarms(repo: Path, out_dir: Path, seed: int) -> dict:
     for c in ctxs:
         a3_files[c.relative_to(repo).as_posix()] = _read(c)
     _write_arm(out_dir, "a3", a3_files, strip, "the pattern as shipped")
-    _write_arm(out_dir, "a4", dict(a3_files), strip,
-               "same surface as a3; dispatch is context-scoped (E3)")
+
+    # A4 must differ from A3 by DELIVERY, not by content: same contexts,
+    # spawned rather than loaded inline. Copying a3 verbatim -- which this
+    # did -- makes A4 a byte-identical duplicate, so E3's "0-cost subagent
+    # handoff" would be answered by an arm that never spawns anything.
+    a4_files = dict(a3_files)
+    if r:
+        a4_files[r.name] = spawn_router(a3_files[r.name])
+    _write_arm(out_dir, "a4", a4_files, strip,
+               "same contexts as a3, delivered by context-scoped spawn (E3)")
 
     _write_arm(out_dir, "a5", {"AGENTS.md": A5_TEMPLATE}, strip,
                "minimal instruction file; language tooling supplies the rest")
@@ -233,8 +322,12 @@ def main():
     ap.add_argument("--repo", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--a1-ref", default="",
+                    help="git ref to recover the maintainers' own instruction "
+                         "file from for arm A1. Required once contexts have "
+                         "been generated, since generation overwrites it")
     args = ap.parse_args()
-    rep = mkarms(Path(args.repo), Path(args.out), args.seed)
+    rep = mkarms(Path(args.repo), Path(args.out), args.seed, args.a1_ref)
     print(json.dumps(rep, indent=2))
     if rep["problems"]:
         print("\nA2 != A3 — the scientific control is invalid; "

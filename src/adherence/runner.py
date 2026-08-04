@@ -245,7 +245,8 @@ def load_grader(scen_dir: Path):
 
 def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
             arm: str = "-", trial: int = 0, floor: int = 0,
-            arms_dir: Path | None = None, parallel: bool = False) -> dict:
+            arms_dir: Path | None = None, parallel: bool = False,
+            timeout_override: int = 0) -> dict:
     meta = load_yamlish(scen_dir / "scenario.yaml")
     sandbox = Path(tempfile.mkdtemp(prefix=f"adh-{scen_dir.name}-"))
     out_dir = Path(tempfile.mkdtemp(prefix=f"adh-out-{scen_dir.name}-"))
@@ -277,7 +278,7 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
 
     proxy_mark(f"{scen_dir.name}|{arm}|{trial}", parallel)
     t0 = time.time()
-    timeout = int(meta.get("timeout", 300))
+    timeout = timeout_override or int(meta.get("timeout", 300))
     target_agent = meta.get("agent", "")
 
     harness = _harness_version(adapter)
@@ -312,6 +313,18 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
     final = final_path.read_text(errors="replace") if final_path.exists() else ""
 
     if adapter_ok:
+        # PR graders need the derived route evidence; stash it where the
+        # grader can reach it without changing the grade() signature every
+        # scenario depends on.
+        tj = sandbox / ".adh-task.json"
+        if tj.is_file():
+            try:
+                rec = json.loads(tj.read_text())
+                rec["_metrics"] = metrics.compute(
+                    transcript, expects_edit=bool(int(meta.get("expects_edit", 1))))
+                tj.write_text(json.dumps(rec))
+            except (json.JSONDecodeError, OSError):
+                pass
         checks = [c.d() for c in load_grader(scen_dir).grade(sandbox, transcript, final)]
     else:
         checks = [gradelib.bad("adapter", adapter_err).d()]
@@ -373,6 +386,11 @@ def main():
                          "a function of GPU scheduling and is NOT comparable "
                          "across arms (§16.4) — it is recorded but stamped "
                          "contended=true")
+    ap.add_argument("--timeout", type=int, default=0,
+                    help="override every scenario's timeout, in seconds. The "
+                         "feasibility probe wants a tighter bound than the "
+                         "grid: a task that has not converged in a few "
+                         "minutes is telling you it floors")
     ap.add_argument("--floor", type=int, default=0,
                     help="measured per-arm harness floor in input tokens "
                          "(E5); tok_in_marginal is meaningless without it")
@@ -400,7 +418,8 @@ def main():
     def one(item):
         scen_dir, arm, trial = item
         r, errs = run_one(scen_dir, adapter, args.model, args.keep_sandbox,
-                          arm, trial, args.floor, arms_dir, args.jobs > 1)
+                          arm, trial, args.floor, arms_dir, args.jobs > 1,
+                          args.timeout)
         if args.jobs > 1:
             # Latency is not recoverable after the fact, so say so in the
             # record rather than letting a contended number be compared

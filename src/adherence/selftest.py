@@ -225,6 +225,13 @@ COST_EXPECTED = {
     "n_subagents": 1,
     "subagent_calls": 3,
     "subagent_tok_in": 10_200,                   # 3000+3500+3700
+    # route evidence: three probes precede the edit, in order; the fourth
+    # read comes after it and must not appear
+    "probe_trail": ["a.py", "clamp", "a.py"],
+    "first_edit": "a.py",
+    "edited_paths": ["a.py"],
+    # the dispatch follows a root call whose output was 200 tokens
+    "handoff_construction_tokens": 200,
 }
 
 

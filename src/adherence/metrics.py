@@ -55,6 +55,58 @@ def probes_to_first_edit(transcript) -> int:
     return n
 
 
+def probe_trail(transcript, limit: int = 40) -> list[str]:
+    """The targets probed before the first edit, in order.
+
+    `probes_to_first_edit` counts exploration; this records where it went.
+    Without it, route correctness -- a registered metric (docs/EVAL.md
+    §Fixtures) -- is not answerable from a results file at all, and every
+    routing claim would rest on a number with no evidence behind it.
+
+    Truncated, because the point is the route taken, not a full log."""
+    out = []
+    for e in transcript:
+        if e.get("type") == schema.EDIT:
+            break
+        if e.get("type") == schema.PROBE:
+            t = e.get("target") or ""
+            if t:
+                out.append(t)
+    return out[:limit]
+
+
+def first_edit(transcript) -> str:
+    for e in transcript:
+        if e.get("type") == schema.EDIT:
+            return e.get("path") or ""
+    return ""
+
+
+def edited_paths(transcript) -> list[str]:
+    seen = []
+    for e in transcript:
+        if e.get("type") == schema.EDIT:
+            p = e.get("path") or ""
+            if p and p not in seen:
+                seen.append(p)
+    return seen
+
+
+def handoff_construction_tokens(transcript) -> int:
+    """Output tokens the parent spent on the call that emitted a dispatch.
+
+    §7 names this as the thing a context *reference* is supposed to make
+    near-zero, versus summarising the context into the subagent's prompt.
+    Attributed to the most recent root call preceding each task event."""
+    total, last_root_out = 0, 0
+    for e in transcript:
+        if e.get("type") == schema.CALL and e.get("agent") == schema.ROOT_AGENT:
+            last_root_out = e.get("output_tokens", 0)
+        elif e.get("type") == schema.TASK:
+            total += last_root_out
+    return total
+
+
 def redundant_reads(transcript) -> int:
     """Probes of a target already probed. Counts repeats, not distinct
     targets: reading one file five times is four redundant reads."""
@@ -156,6 +208,13 @@ def compute(transcript, floor: int = 0, duration_s: float | None = None,
         # §7: total_tokens is the only figure quotable as a saving;
         # per-agent numbers are diagnostics. Both are reported, and the
         # total leads.
+        # Evidence for route correctness, not just its count. A number
+        # without the trail behind it cannot be audited by anyone who did
+        # not run it.
+        "probe_trail": probe_trail(transcript),
+        "first_edit": first_edit(transcript),
+        "edited_paths": edited_paths(transcript),
+        "handoff_construction_tokens": handoff_construction_tokens(transcript),
         "n_subagents": len({c.get("agent") for c in subs}),
         "subagent_calls": len(subs),
         "subagent_tok_in": sum(c.get("input_tokens", 0) for c in subs),

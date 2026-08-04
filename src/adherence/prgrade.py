@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import shlex
+from pathlib import Path
 
 from adherence.gradelib import Check, bad, git_changed_files, ok, sh, skip
 
@@ -73,6 +74,28 @@ def grade(sandbox, transcript, final) -> list[Check]:
                        f"different valid fix may touch different files")
                   if extra else
                   ok("pr.scope", "touched nothing outside the real diff"))
+
+    # --- route correctness (docs/EVAL.md §Fixtures) --------------------
+    # Ground truth is the directories the real merge diff touched. The
+    # question is whether the agent's exploration went there, and how much
+    # of it went somewhere else. Reported, never failed: an agent that
+    # reaches the right file by an unexpected path has still routed well.
+    real_dirs = {str(Path(p).parent) for p in real}
+    m = task.get("_metrics") or {}
+    trail = m.get("probe_trail") or []
+    first = m.get("first_edit", "")
+    if trail:
+        hit = [t for t in trail
+               if any(t.startswith(d) or d in t for d in real_dirs if d)]
+        checks.append(skip("pr.route",
+                           f"{len(hit)}/{len(trail)} pre-edit probes landed in "
+                           f"the real diff's directories {sorted(real_dirs)[:3]}"
+                           f"; first edit: {first or '(none)'}; "
+                           f"trail: {trail[:6]}"))
+    else:
+        checks.append(skip("pr.route",
+                           "no probes recorded before the first edit; the "
+                           "adapter may not emit probe events"))
 
     # --- the maintainers' own tests decide it -------------------------
     test_files = task.get("test_files") or []

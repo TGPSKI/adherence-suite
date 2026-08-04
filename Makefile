@@ -16,7 +16,7 @@ RUNNER   = $(PYTHON) -m adherence.runner --adapter $(ADAPTER) --model $(MODEL) \
              --trials $(TRIALS) $(ARMFLAGS) --out $(OUT)
 
 .PHONY: help check ci-local compile selftest schema lint table matrix report \
-	analyze calibrate screen mkpr mkscenarios probe run all clean
+	analyze calibrate screen mkpr mkscenarios trees probe run all clean
 
 help:
 	@printf '%s\n' \
@@ -40,7 +40,9 @@ help:
 		'  make screen                score candidate fixture repos (needs gh)' \
 		'  make mkpr REPO= MIRROR= SINCE=  merged PRs -> tasks, gradeability proven' \
 		'  make mkscenarios TASKS= MIRROR= FIXTURE=  tasks -> runnable scenarios' \
+		'  make trees MIRROR= BASE= ARMSDIR=  each arm as a folder, to read and diff' \
 		'  make probe SUITE=          difficulty probe: A1 only, no generation' \
+		'                             [JOBS=4 TIMEOUT=600 ONLY=a,b TRIALS=3]' \
 		'' \
 		'variables:' \
 		'  MODEL    <provider>/<model>; provider is a key in bench/opencode-bench.json' \
@@ -94,6 +96,14 @@ calibrate:
 screen:
 	$(PY) -m adherence.screen_repos
 
+## Materialize each arm as a real folder you can read and diff
+trees:
+	@test -n "$(MIRROR)" -a -n "$(BASE)" -a -n "$(ARMSDIR)" || { \
+		echo 'usage: make trees MIRROR=fixtures/x.git BASE=<commit> ARMSDIR=fixtures/x.arms [OUT=fixtures/x.trees]'; exit 1; }
+	$(PY) -m adherence.trees --mirror $(MIRROR) --base $(BASE) \
+		--arms-dir $(ARMSDIR) --out $(or $(OUT),fixtures/trees) \
+		$(if $(ARMS),--arms $(ARMS),)
+
 ## Turn a verified task set into runnable scenarios
 mkscenarios:
 	@test -n "$(TASKS)" -a -n "$(MIRROR)" -a -n "$(FIXTURE)" || { \
@@ -115,7 +125,9 @@ probe:
 	mkdir -p $(dir $(PROBE_OUT))
 	bench/isolate.sh $(PYTHON) -m adherence.runner --suite $(SUITE) \
 		--adapter $(ADAPTER) --model $(MODEL) --trials $(or $(TRIALS),3) \
-		--arm a1 --out $(PROBE_OUT)
+		--arm a1 --out $(PROBE_OUT) \
+		$(if $(JOBS),--jobs $(JOBS),) $(if $(TIMEOUT),--timeout $(TIMEOUT),) \
+		$(if $(ONLY),--only $(ONLY),)
 	@$(PY) -m adherence.probe $(PROBE_OUT)
 
 ## Extract merged PRs into scenarios and prove each is gradeable (no model)
