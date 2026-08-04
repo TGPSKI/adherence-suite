@@ -378,9 +378,12 @@ class SuiteTui(TuiApp):
                      C.color_pair(2) if n_live else C.A_DIM),
                     ("[s] sort [S] asc/desc", C.A_DIM),
                     ("[/] filter", C.A_DIM),
-                    ("[F] clear", C.A_DIM), ("[p] pick", C.A_DIM),
-                    ("[space] detail", C.A_DIM), ("[r] reload", C.A_DIM),
-                    ("[q] quit", C.A_DIM)]
+                    ("[F] clear", C.A_DIM), ("[p] pick", C.A_DIM)]
+            # cost and calib have no detail pane; advertising one is worse
+            # than offering none, because the key is tried and does nothing.
+            if VIEWS[self.view] in ("cells", "tasks", "design"):
+                keys.append(("[space] detail", C.A_DIM))
+            keys += [("[r] reload", C.A_DIM), ("[q] quit", C.A_DIM)]
         if self.editing:
             keys = [("type a filter · [enter] apply · [esc] cancel", C.A_BOLD)]
         self.render_footer_items(max_y, keys)
@@ -700,8 +703,16 @@ class SuiteTui(TuiApp):
                            "pass" if r["all_pass"] else "fail")
                 col = (C.color_pair(3) if ung else
                        C.color_pair(1) if r["all_pass"] else C.color_pair(4))
-                fails = ", ".join(c["name"] for c in r["checks"]
-                                  if c["status"] == "fail") or "—"
+                if ung:
+                    # The reason lives in the adapter check's evidence. An
+                    # ungradeable row showed "—" here, so the one column
+                    # that explains the verdict was blank on exactly the
+                    # rows whose verdict needs explaining.
+                    fails = " ".join(
+                        str(ung[0].get("evidence", "")).split()) or "harness"
+                else:
+                    fails = ", ".join(c["name"] for c in r["checks"]
+                                      if c["status"] == "fail") or "—"
                 self._put(y, 1, f"{r['scenario'][:19]:<20}", hl)
                 self._put(y, 21, f"{r.get('arm', '-'):>4}", C.A_DIM)
                 self._put(y, 25, f"{r['trial']:>3}", C.A_DIM)
@@ -718,7 +729,8 @@ class SuiteTui(TuiApp):
                 self._put(y, 60, f"{started_local(r):>18}", C.A_DIM)
                 self._put(y, 78, f"{lv.fmt_age(r.get('duration_s', 0)):>9}",
                           C.A_DIM)
-                self._put(y, 89, fails[:max(0, max_x - 91)], C.A_DIM)
+                self._put(y, 89, fails[:max(0, max_x - 91)],
+                          C.color_pair(3) if ung else C.A_DIM)
                 y += 1
             if len(recent) > rows_g:
                 self.scrollbar(top_g, rows_g, max_x - 2, len(recent),
