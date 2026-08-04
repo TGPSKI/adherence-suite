@@ -320,7 +320,7 @@ control.
 | Confound | Handling |
 |---|---|
 | Monolith is a strawman | Two monolith arms; A2 content-matched by construction |
-| Harness floor inflates ratios | Per-arm floor calibration; report total *and* marginal |
+| Harness floor inflates ratios | Per-arm floor calibration (`make floors`); report total *and* marginal |
 | Adapter token accounting unverified | Recording proxy is authoritative; 2% agreement gate |
 | Prompt caching | `tok_effective`; needs a metered API, not the local endpoint |
 | Cheapness via doing less | Success-conditioning, Pareto plane, `abandoned` flag |
@@ -374,6 +374,26 @@ Both halves wrong. s05 is 2–3 calls at a **~9.5k** floor; the 17,046 figure wa
 one session *total* over two calls read as one call. Since `tok_in_marginal =
 tok_in_billed − floor × calls`, the marginal decomposition is only correct with
 a measured per-arm floor.
+
+Those floors are now measured, on the validation grid, by `make floors`. For a
+given scenario the task prompt is byte-identical across arms, so the difference
+between arms on **call 1** is the instruction surface and nothing else — no
+tool results yet, no exploration, no model choices:
+
+| arm | always-loaded surface | floor vs A1 |
+|---|---|---|
+| A1 | 6,518 B | — |
+| A2 | 18,060 B | **+3,102 tok** |
+| A3 | 3,474 B | **−815 tok** |
+
+Measured across 5 scenarios the per-scenario spread is ±3 tokens, and the two
+arms agree on 3.73 B/tok to 0.4%. That agreement is the check, not a
+curiosity: a floor that did not track the on-disk surface at one constant rate
+would mean call 1 carried something besides the instruction surface, and
+`adherence.floors` exits non-zero rather than report a number it cannot
+defend. **A3 starts 815 tokens per call *below* the practical control** — the
+directed router is smaller than the file it replaces, and any A3 cost above A1
+is exploration, not preamble.
 
 **Subagent cost was invisible.** A dispatched subagent runs in its own session,
 and neither the root stream nor the root export contains one of its calls.

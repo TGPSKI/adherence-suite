@@ -16,7 +16,7 @@ RUNNER   = $(PYTHON) -m adherence.runner --adapter $(ADAPTER) --model $(MODEL) \
              --trials $(TRIALS) $(ARMFLAGS) --out $(OUT)
 
 .PHONY: help check ci-local compile selftest schema lint table matrix report \
-	analyze calibrate screen mkpr mkscenarios trees probe run all clean
+	analyze floors calibrate screen mkpr mkscenarios trees probe run all clean
 
 help:
 	@printf '%s\n' \
@@ -33,6 +33,8 @@ help:
 		'  make report [FILES=...]    publishable markdown scoreboard' \
 		'  make calibrate             proxy vs adapter agreement — the H4 gate' \
 		'  make analyze [FILES=...]   pre-specified falsifier verdicts (docs/EVAL.md)' \
+		'  make floors [FILES= ARMS_DIR=]  per-arm instruction floor for' \
+		'                             tok_in_marginal, cross-checked vs bytes' \
 		'' \
 		'runs — these spend GPU time:' \
 		'  make run S=s05             one scenario' \
@@ -88,6 +90,10 @@ report:
 
 analyze:
 	$(PY) -m adherence.analyze $(or $(FILES),$(OUT))
+
+floors:
+	$(PY) -m adherence.floors $(or $(FILES),$(OUT)) \
+		$(if $(ARMS_DIR),--arms-dir $(ARMS_DIR),) --ref $(or $(REF),a1)
 
 calibrate:
 	$(PY) -m adherence.calibrate $(or $(FILES),runs/cal-results.jsonl) \
