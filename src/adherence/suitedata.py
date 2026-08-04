@@ -347,6 +347,15 @@ def calibration(rows, proxy_rows):
     by_mark = M.split_by_mark(proxy_rows)
     out = []
     for r in rows:
+        # A trial the harness stopped has a transcript truncated by
+        # construction -- or, before salvage existed, none at all. Compared
+        # against the proxy's complete record it reads as a 100% accounting
+        # error, which is not what H4 measures and buries the disagreements
+        # that are real. Excluded here for the same reason exclusion
+        # criterion 1 drops it from every pass rate.
+        if any(c.get("name") == "adapter" and c.get("status") != "pass"
+               for c in r.get("checks", [])):
+            continue
         mark = f"{r['scenario']}|{r.get('arm', '-')}|{r['trial']}"
         pr = by_mark.get(mark)
         if pr is None:

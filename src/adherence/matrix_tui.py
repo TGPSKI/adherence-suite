@@ -68,7 +68,9 @@ def started_local(row) -> str:
     try:
         import datetime as _dt
         d = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        return d.astimezone().strftime("%H:%M:%S")
+        # Date included because a grid runs for hours and can cross
+        # midnight; a bare clock time then sorts and reads wrongly.
+        return d.astimezone().strftime("%m-%d %H:%M:%S")
     except (ValueError, TypeError):
         return ts[-8:] or "—"
 # Per-section sorts, cycled with [s] on whichever section has focus.
@@ -671,8 +673,8 @@ class SuiteTui(TuiApp):
                       C.color_pair(5) if self.live_section == 2 else C.A_BOLD)
             y += 1
             self._put(y, 1, f"{'scenario':<20}{'arm':>4}{'t':>3}"
-                            f"{'verdict':>13}{'started':>10}{'calls':>7}"
-                            f"{'tok_in':>12}{'dur':>9}  failing", C.A_DIM)
+                            f"{'verdict':>13}{'calls':>7}{'tok_in':>12}"
+                            f"{'started':>18}{'dur':>9}  failing", C.A_DIM)
             y += 1
             self.graded_cursor = max(0, min(self.graded_cursor,
                                             len(recent) - 1))
@@ -708,12 +710,15 @@ class SuiteTui(TuiApp):
                 # results land out of order now that each is emitted as it
                 # finishes, so "recent" in the sort and "started" here
                 # answer two different questions.
-                self._put(y, 41, f"{started_local(r):>10}", C.A_DIM)
-                self._put(y, 51, f"{m.get('calls', 0):>7}", C.A_DIM)
-                self._put(y, 58, f"{m.get('tok_in_billed', 0):>12,}", C.A_DIM)
-                self._put(y, 70, f"{lv.fmt_age(r.get('duration_s', 0)):>9}",
+                self._put(y, 41, f"{m.get('calls', 0):>7}", C.A_DIM)
+                self._put(y, 48, f"{m.get('tok_in_billed', 0):>12,}", C.A_DIM)
+                # When it began and how long it took, side by side: with
+                # results landing in completion order the two together are
+                # what place a trial in the run.
+                self._put(y, 60, f"{started_local(r):>18}", C.A_DIM)
+                self._put(y, 78, f"{lv.fmt_age(r.get('duration_s', 0)):>9}",
                           C.A_DIM)
-                self._put(y, 81, fails[:max(0, max_x - 83)], C.A_DIM)
+                self._put(y, 89, fails[:max(0, max_x - 91)], C.A_DIM)
                 y += 1
             if len(recent) > rows_g:
                 self.scrollbar(top_g, rows_g, max_x - 2, len(recent),

@@ -292,6 +292,19 @@ def compute(transcript, floor: int = 0, duration_s: float | None = None,
         "turns_until_first_compaction": turns_until_first_compaction(transcript),
         "abandoned": abandoned(transcript, expects_edit, completed,
                                observed_edits),
+        # Dispatches the stream saw, against subagent sessions the
+        # transcript actually carries. They must match. When they do not,
+        # the child walker missed a session and every subagent number in
+        # this row is an under-report -- measured at 26 calls recorded
+        # against 66 the proxy handled, with two whole sessions absent.
+        # Recorded rather than corrected, because the proxy is the
+        # authority on the real figure (§3.2) and a silently patched
+        # transcript would hide the disagreement that says so.
+        "task_dispatches": sum(1 for e in transcript
+                               if e.get("type") == schema.TASK),
+        "subagent_capture_gap": max(
+            0, sum(1 for e in transcript if e.get("type") == schema.TASK)
+            - len({e.get("agent") for e in subagent_calls(transcript)})),
         # What git saw, beside what the transcript claims. A gap between
         # them means the agent edited through a tool the stream does not
         # mark as an edit, which silently empties first_edit, probe_trail
