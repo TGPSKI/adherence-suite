@@ -43,8 +43,8 @@ help:
 		'  make mkpr REPO= MIRROR= SINCE=  merged PRs -> tasks, gradeability proven' \
 		'  make mkscenarios TASKS= MIRROR= FIXTURE=  tasks -> runnable scenarios' \
 		'  make trees MIRROR= BASE= ARMSDIR=  each arm as a folder, to read and diff' \
-		'  make probe SUITE=          difficulty probe: A1 only, no generation' \
-		'                             [JOBS=4 TIMEOUT=600 ONLY=a,b TRIALS=3]' \
+		'  make probe                 difficulty probe: A1 only, no generation' \
+		'                             [JOBS=4 TIMEOUT=900 ONLY=a,b PROBE_TRIALS=5]' \
 		'' \
 		'variables:' \
 		'  MODEL    <provider>/<model>; provider is a key in bench/opencode-bench.json' \
@@ -119,6 +119,13 @@ mkscenarios:
 
 ## Difficulty probe: A1 only, no context generation. Answers "can these
 ## tasks discriminate?" before any of the expensive work.
+# Its own file: a difficulty probe is calibration, not results, and the
+# two must not pool. PROBE_TRIALS is separate from TRIALS because TRIALS
+# is `?= 1` at the top, so `$(or $(TRIALS),3)` resolved to 1 and the
+# documented default of 3 never once applied.
+PROBE_OUT    ?= runs/probe.jsonl
+PROBE_TRIALS ?= 5
+
 probe: SUITE := $(or $(SUITE),suite-pr.yaml)
 probe:
 	@test -f "$(SUITE)" || { \
@@ -130,7 +137,7 @@ probe:
 		echo "  3. make probe SUITE=$(SUITE)"; exit 1; }
 	mkdir -p $(dir $(PROBE_OUT))
 	bench/isolate.sh $(PYTHON) -m adherence.runner --suite $(SUITE) \
-		--adapter $(ADAPTER) --model $(MODEL) --trials $(or $(TRIALS),3) \
+		--adapter $(ADAPTER) --model $(MODEL) --trials $(PROBE_TRIALS) \
 		--arm a1 --out $(PROBE_OUT) \
 		$(if $(JOBS),--jobs $(JOBS),) $(if $(TIMEOUT),--timeout $(TIMEOUT),) \
 		$(if $(ONLY),--only $(ONLY),)
