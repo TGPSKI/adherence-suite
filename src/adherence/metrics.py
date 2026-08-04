@@ -41,10 +41,21 @@ def subagent_calls(transcript) -> list[dict]:
 
 
 def probes_to_first_edit(transcript) -> int:
-    """Read/glob/grep calls before the first edit — the exploration the
-    router claims to make unnecessary (E2). A run that never edits scores
-    all of its probes, because 'explored and gave up' is exactly the
-    behaviour this is meant to expose, not a missing value."""
+    """Read/glob/grep calls before the first edit.
+
+    Read this as **locating latency** -- how long until the agent knew
+    where to work -- which is what a router claims to shorten. Do not read
+    it as total exploration cost, for two reasons:
+
+    - It is gameable. An agent that edits first and investigates afterwards
+      scores 0 and looks maximally efficient while being reckless. Always
+      read it beside `probes_total`.
+    - It covers only the first segment. Real work is explore, edit,
+      explore, edit; everything after the first edit is invisible here and
+      lives in `probes_after_first_edit`.
+
+    A run that never edits scores all of its probes, because 'explored and
+    gave up' is the behaviour this should expose, not a missing value."""
     n = 0
     for e in transcript:
         t = e.get("type")
@@ -108,11 +119,30 @@ def handoff_construction_tokens(transcript) -> int:
 
 
 def redundant_reads(transcript) -> int:
-    """Probes of a target already probed. Counts repeats, not distinct
-    targets: reading one file five times is four redundant reads."""
+    """Re-probes of a target that has not changed since it was last probed.
+
+    "Redundant" is a strong word and the naive version did not earn it: it
+    counted every repeat of a (tool, target) pair, which scores as waste
+    the single most correct thing an agent does -- re-reading a file it
+    just edited to confirm the edit landed. That inverts the metric on
+    exactly the careful behaviour it should reward.
+
+    So an edit to a target clears it: the next probe of that target is a
+    fresh read of changed content, not a repeat.
+
+    What it still cannot see, and what therefore keeps it a heuristic:
+    context compaction. A file re-read forty turns later because the
+    harness dropped it from the window is not the agent being wasteful,
+    and nothing in the transcript distinguishes that from carelessness
+    until `compaction` events are actually observed."""
     seen, n = set(), 0
     for e in transcript:
-        if e.get("type") != schema.PROBE:
+        t = e.get("type")
+        if t == schema.EDIT:
+            path = e.get("path") or ""
+            seen = {k for k in seen if k[1] != path}
+            continue
+        if t != schema.PROBE:
             continue
         key = (e.get("tool"), e.get("target"))
         if key in seen:
@@ -120,6 +150,31 @@ def redundant_reads(transcript) -> int:
         else:
             seen.add(key)
     return n
+
+
+def probes_total(transcript) -> int:
+    return sum(1 for e in transcript if e.get("type") == schema.PROBE)
+
+
+def probes_after_first_edit(transcript) -> int:
+    return probes_total(transcript) - probes_to_first_edit(transcript)
+
+
+def probe_bytes(transcript, before_first_edit: bool = False) -> int:
+    """Bytes exploration pulled into the context.
+
+    This is the number E2 is actually about. "Exploration reads are
+    burning tokens" is a claim about volume, and a probe *count* does not
+    measure volume: three reads returning 200 KB cost far more than ten
+    returning 2 KB. Count answers "how many steps"; bytes answers "how
+    much did it cost", and only the second is the claim."""
+    total = 0
+    for e in transcript:
+        if before_first_edit and e.get("type") == schema.EDIT:
+            break
+        if e.get("type") == schema.PROBE:
+            total += e.get("bytes_returned", 0) or 0
+    return total
 
 
 def tool_calls(transcript) -> int:
@@ -200,6 +255,10 @@ def compute(transcript, floor: int = 0, duration_s: float | None = None,
         "floor_used": floor,
         "tool_calls": tool_calls(transcript),
         "probes_to_first_edit": probes_to_first_edit(transcript),
+        "probes_total": probes_total(transcript),
+        "probes_after_first_edit": probes_after_first_edit(transcript),
+        "probe_bytes": probe_bytes(transcript),
+        "probe_bytes_to_first_edit": probe_bytes(transcript, True),
         "redundant_reads": redundant_reads(transcript),
         "compactions": sum(1 for e in transcript
                            if e.get("type") == schema.COMPACTION),

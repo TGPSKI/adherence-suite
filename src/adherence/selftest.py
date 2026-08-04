@@ -218,7 +218,16 @@ COST_EXPECTED = {
     "cache_write": 1_000,
     "tool_calls": 7,                             # 4 probes + 1 task + 1 edit + 1 command
     "probes_to_first_edit": 3,
-    "redundant_reads": 2,
+    "probes_total": 4,
+    "probes_after_first_edit": 1,
+    # 500 + 40 + 500 + 500
+    "probe_bytes": 1_540,
+    # 500 + 40 + 500, stopping at the edit
+    "probe_bytes_to_first_edit": 1_040,
+    # a.py is read twice BEFORE any edit -> 1 redundant. The third read
+    # comes after a.py was edited, so it is a fresh read of changed
+    # content and must NOT count.
+    "redundant_reads": 1,
     "compactions": 0,
     "turns_until_first_compaction": None,
     "abandoned": False,
@@ -271,6 +280,37 @@ def check_cost_metrics() -> list[str]:
     if got["tok_in_billed"] == 22_000:
         problems.append("tok_in_billed matches the root-only `usage` event — "
                         "cost is being read from usage, not from calls")
+
+    # An edit must clear the target: re-reading a file you just changed is
+    # the careful thing to do, and the naive metric scored it as waste.
+    reread = [schema.capability(task_events=True, call_events=True),
+              schema.call(seq=0, input_tokens=1000, output_tokens=10),
+              schema.probe("read", "a.py", bytes_returned=10),
+              schema.edit("a.py", "fixed\n"),
+              schema.probe("read", "a.py", bytes_returned=10)]
+    if metrics.compute(reread)["redundant_reads"] != 0:
+        problems.append("re-reading a file after editing it was counted "
+                        "redundant; an edit must clear the target")
+    noedit = [schema.capability(task_events=True, call_events=True),
+              schema.call(seq=0, input_tokens=1000, output_tokens=10),
+              schema.probe("read", "a.py", bytes_returned=10),
+              schema.probe("read", "a.py", bytes_returned=10)]
+    if metrics.compute(noedit)["redundant_reads"] != 1:
+        problems.append("re-reading an unchanged file was not counted "
+                        "redundant")
+
+    # probes_to_first_edit is gameable: edit first, explore after. It must
+    # be readable beside probes_total, which is why both are recorded.
+    edit_first = [schema.capability(task_events=True, call_events=True),
+                  schema.call(seq=0, input_tokens=1000, output_tokens=10),
+                  schema.edit("a.py", "x\n"),
+                  schema.probe("read", "a.py", bytes_returned=10),
+                  schema.probe("read", "b.py", bytes_returned=10)]
+    m = metrics.compute(edit_first)
+    if not (m["probes_to_first_edit"] == 0 and m["probes_total"] == 2):
+        problems.append(f"edit-first run: probes_to_first_edit="
+                        f"{m['probes_to_first_edit']} total={m['probes_total']}"
+                        f"; the prefix metric must be 0 and the total 2")
 
     # Abandonment detection must fire on a do-nothing run (§5 control 3).
     lazy = [schema.capability(task_events=True, call_events=True),
