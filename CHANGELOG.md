@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `src/adherence/tui/` is now vendored from its canonical public
+  upstream, [pane](https://github.com/TGPSKI/pane) (previously copied
+  from leather), picking up `bar_chart`'s aggregation binning, outlier
+  clipping and top-row label collision handling, plus the new
+  `interact.py` module. Byte-identity is checkable with
+  `make vendor-check` in a pane checkout; README/ruff.toml provenance
+  notes updated.
+
 ### Added
 
 - **Pre-registration of the directed-contexts eval**, frozen at tag

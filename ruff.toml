@@ -9,9 +9,9 @@ exclude = [
     "fixtures",
     "bench/.xdg",
     "runs",
-    # Vendored verbatim from leather (see README, License). Upstream owns
+    # Vendored verbatim from pane (see README, License). Upstream owns
     # the API; reformatting it here would guarantee a conflict on the next
-    # re-copy for no benefit.
+    # re-vendor for no benefit.
     "src/adherence/tui",
 ]
 
