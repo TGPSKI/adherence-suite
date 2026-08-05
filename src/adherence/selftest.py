@@ -834,12 +834,25 @@ def check_proxy_attribution() -> list[str]:
         for t in ts:
             t.join()
 
-        rows = [_json.loads(x) for x in log.read_text().splitlines() if x.strip()]
+        # The proxy writes its log row AFTER the response is on the wire
+        # (see proxy._pump_body), so a client that has already read its body
+        # can be a few milliseconds ahead of the recorder. Wait for the log
+        # to settle instead of racing it: this is write latency, not
+        # attribution, and asserting straight through it is what made CI
+        # flaky on the slower runner.
+        deadline = time.time() + 5.0
+        rows = []
+        while True:
+            rows = [_json.loads(x) for x in log.read_text().splitlines()
+                    if x.strip()]
+            if len(rows) >= sum(sent.values()) or time.time() > deadline:
+                break
+            time.sleep(0.05)
         groups = _M.split_by_mark(rows)
 
         # The invariant is "no call lands in the wrong bucket", NOT "exactly
         # N requests succeeded". Those came apart on 3.10, where the client
-        # can raise on a keep-alive connection AFTER the proxy has already
+        # can also raise on a keep-alive connection AFTER the proxy has
         # handled and logged the call: `sent` undercounts, the log does not,
         # and comparing them reported a networking hiccup as
         # cross-attribution -- a red CI run for the opposite of the defect
