@@ -1,0 +1,163 @@
+tyler@ego-killer ~/git/TGPSKI/adherence-suite $ make probe ARMSDIR=fixtures/cli-cli.arms JOBS=3 TIMEOUT=2700 IDLE=300 \
+  ONLY=cli-cli-13057,cli-cli-13068,cli-cli-13362,cli-cli-13412,cli-cli-13413,cli-cli-13418,cli-cli-13421,cli-cli-13430,cli-cli-13449,cli-cli-13459,cli-cli-13471,cli-cli-13523,cli-cli-13541,cli-cli-13548,cli-cli-13580,cli-cli-13620,cli-cli-13681,cli-cli-13722,cli-cli-13723,cli-cli-13807,cli-cli-13823,cli-cli-13864,cli-cli-13987,cli-cli-13988
+mkdir -p runs/
+bench/isolate.sh python3 -m adherence.runner --suite suite-pr.yaml \
+        --adapter adapters/opencode.sh --model local/qwen36-35b-a3b-nvfp4 --trials 5 \
+        --arm a1 --out runs/probe.jsonl \
+        --arms-dir fixtures/cli-cli.arms \
+        --jobs 3 --timeout 2700 \
+        --idle-timeout 300 \
+        --only cli-cli-13057,cli-cli-13068,cli-cli-13362,cli-cli-13412,cli-cli-13413,cli-cli-13418,cli-cli-13421,cli-cli-13430,cli-cli-13449,cli-cli-13459,cli-cli-13471,cli-cli-13523,cli-cli-13541,cli-cli-13548,cli-cli-13580,cli-cli-13620,cli-cli-13681,cli-cli-13722,cli-cli-13723,cli-cli-13807,cli-cli-13823,cli-cli-13864,cli-cli-13987,cli-cli-13988
+proxy: 127.0.0.1:8010 -> http://127.0.0.1:8000 log=runs/probe.proxy.jsonl
+isolate: recording every inference call to runs/probe.proxy.jsonl
+note: --jobs>1 with a recording proxy. Trial marks are skipped (they are one piece of shared state and two trials would interleave), but each trial routes through its own /__run/<id> path, so per-trial attribution is exact and the H4 gate is measurable in parallel.
+cli-cli-13057 arm=a1 trial=1 all_pass=False dur=2701.0s calls=0 tok_in=0
+cli-cli-13057 arm=a1 trial=2 all_pass=False dur=2701.0s calls=0 tok_in=0
+cli-cli-13057 arm=a1 trial=0 all_pass=False dur=2701.0s calls=0 tok_in=0
+cli-cli-13068 arm=a1 trial=0 all_pass=True dur=404.3s calls=26 tok_in=894535
+cli-cli-13068 arm=a1 trial=1 all_pass=True dur=303.0s calls=62 tok_in=2898750
+cli-cli-13068 arm=a1 trial=2 all_pass=True dur=244.0s calls=35 tok_in=1383795
+cli-cli-13057 arm=a1 trial=4 all_pass=True dur=1166.8s calls=30 tok_in=2657861
+cli-cli-13068 arm=a1 trial=3 all_pass=True dur=273.4s calls=47 tok_in=2420639
+cli-cli-13362 arm=a1 trial=0 all_pass=True dur=97.1s calls=29 tok_in=1049417
+cli-cli-13068 arm=a1 trial=4 all_pass=True dur=189.8s calls=35 tok_in=1272343
+cli-cli-13362 arm=a1 trial=1 all_pass=True dur=105.8s calls=30 tok_in=1293304
+cli-cli-13362 arm=a1 trial=2 all_pass=True dur=108.0s calls=30 tok_in=1160735
+cli-cli-13362 arm=a1 trial=3 all_pass=False dur=37.2s calls=11 tok_in=237090 FAILED:['pr.diff_coverage', 'pr.task_pass']
+cli-cli-13057 arm=a1 trial=3 all_pass=True dur=1482.4s calls=85 tok_in=6982703
+cli-cli-13362 arm=a1 trial=4 all_pass=False dur=25.6s calls=8 tok_in=184949 FAILED:['pr.diff_coverage', 'pr.task_pass']
+cli-cli-13412 arm=a1 trial=0 all_pass=True dur=71.7s calls=20 tok_in=550371
+cli-cli-13412 arm=a1 trial=2 all_pass=True dur=60.0s calls=20 tok_in=512865
+cli-cli-13412 arm=a1 trial=1 all_pass=True dur=91.5s calls=26 tok_in=842463
+cli-cli-13413 arm=a1 trial=0 all_pass=True dur=45.6s calls=12 tok_in=245068
+cli-cli-13412 arm=a1 trial=4 all_pass=True dur=82.0s calls=24 tok_in=612347
+cli-cli-13412 arm=a1 trial=3 all_pass=True dur=89.2s calls=28 tok_in=767078
+cli-cli-13413 arm=a1 trial=1 all_pass=True dur=29.7s calls=6 tok_in=172849
+cli-cli-13413 arm=a1 trial=4 all_pass=True dur=29.4s calls=7 tok_in=156997
+cli-cli-13413 arm=a1 trial=3 all_pass=True dur=44.7s calls=11 tok_in=322022
+cli-cli-13413 arm=a1 trial=2 all_pass=True dur=82.0s calls=20 tok_in=419035
+cli-cli-13418 arm=a1 trial=0 all_pass=True dur=320.2s calls=60 tok_in=5670343
+cli-cli-13418 arm=a1 trial=1 all_pass=True dur=390.8s calls=75 tok_in=5475968
+cli-cli-13418 arm=a1 trial=2 all_pass=True dur=529.4s calls=68 tok_in=6032990
+cli-cli-13421 arm=a1 trial=0 all_pass=True dur=91.0s calls=22 tok_in=1214383
+cli-cli-13421 arm=a1 trial=1 all_pass=True dur=44.0s calls=12 tok_in=315729
+cli-cli-13418 arm=a1 trial=3 all_pass=True dur=441.3s calls=73 tok_in=4941788
+cli-cli-13421 arm=a1 trial=2 all_pass=True dur=103.6s calls=20 tok_in=496254
+cli-cli-13418 arm=a1 trial=4 all_pass=True dur=440.7s calls=101 tok_in=8838701
+cli-cli-13421 arm=a1 trial=3 all_pass=True dur=104.7s calls=24 tok_in=1099840
+cli-cli-13430 arm=a1 trial=0 all_pass=True dur=72.7s calls=15 tok_in=393772
+cli-cli-13421 arm=a1 trial=4 all_pass=True dur=96.0s calls=16 tok_in=655945
+cli-cli-13430 arm=a1 trial=1 all_pass=True dur=117.8s calls=30 tok_in=992842
+cli-cli-13430 arm=a1 trial=2 all_pass=True dur=88.2s calls=21 tok_in=508089
+cli-cli-13430 arm=a1 trial=4 all_pass=True dur=34.7s calls=8 tok_in=215432
+cli-cli-13430 arm=a1 trial=3 all_pass=True dur=119.9s calls=16 tok_in=472160
+cli-cli-13449 arm=a1 trial=2 all_pass=True dur=175.9s calls=15 tok_in=634758
+cli-cli-13449 arm=a1 trial=0 all_pass=True dur=648.4s calls=88 tok_in=6988228
+cli-cli-13449 arm=a1 trial=1 all_pass=True dur=752.8s calls=96 tok_in=7704365
+cli-cli-13449 arm=a1 trial=3 all_pass=True dur=855.2s calls=96 tok_in=9068772
+cli-cli-13459 arm=a1 trial=0 all_pass=False dur=386.6s calls=51 tok_in=2973607 FAILED:['cli.surface']
+cli-cli-13459 arm=a1 trial=1 all_pass=False dur=166.0s calls=25 tok_in=3162088 FAILED:['cli.surface']
+cli-cli-13459 arm=a1 trial=3 all_pass=False dur=319.5s calls=56 tok_in=2478276 FAILED:['cli.surface']
+cli-cli-13449 arm=a1 trial=4 all_pass=True dur=1083.5s calls=98 tok_in=10081404
+cli-cli-13459 arm=a1 trial=2 all_pass=False dur=632.8s calls=84 tok_in=5241689 FAILED:['cli.surface']
+cli-cli-13471 arm=a1 trial=0 all_pass=True dur=109.1s calls=22 tok_in=1621232
+cli-cli-13471 arm=a1 trial=1 all_pass=True dur=94.6s calls=24 tok_in=1780156
+cli-cli-13471 arm=a1 trial=2 all_pass=True dur=119.1s calls=25 tok_in=1856871
+cli-cli-13471 arm=a1 trial=3 all_pass=True dur=101.8s calls=19 tok_in=1368389
+cli-cli-13471 arm=a1 trial=4 all_pass=True dur=206.9s calls=43 tok_in=3798524
+cli-cli-13523 arm=a1 trial=0 all_pass=True dur=201.0s calls=32 tok_in=1494979
+cli-cli-13459 arm=a1 trial=4 all_pass=False dur=687.1s calls=72 tok_in=6690945 FAILED:['cli.surface']
+cli-cli-13523 arm=a1 trial=1 all_pass=True dur=116.8s calls=14 tok_in=1136913
+cli-cli-13523 arm=a1 trial=2 all_pass=True dur=137.3s calls=29 tok_in=2441263
+cli-cli-13523 arm=a1 trial=3 all_pass=True dur=156.8s calls=22 tok_in=993191
+cli-cli-13523 arm=a1 trial=4 all_pass=True dur=125.8s calls=21 tok_in=618300
+cli-cli-13541 arm=a1 trial=0 all_pass=True dur=741.8s calls=136 tok_in=14587499
+cli-cli-13541 arm=a1 trial=2 all_pass=True dur=1057.4s calls=171 tok_in=21189386
+cli-cli-13541 arm=a1 trial=4 all_pass=True dur=143.2s calls=46 tok_in=2878231
+cli-cli-13541 arm=a1 trial=1 all_pass=True dur=1257.2s calls=149 tok_in=18833119
+cli-cli-13548 arm=a1 trial=1 all_pass=False dur=297.1s calls=70 tok_in=4367467 FAILED:['pr.task_pass']
+cli-cli-13548 arm=a1 trial=0 all_pass=True dur=341.4s calls=71 tok_in=6027213
+cli-cli-13541 arm=a1 trial=3 all_pass=True dur=1030.5s calls=166 tok_in=22243133
+cli-cli-13548 arm=a1 trial=3 all_pass=True dur=349.1s calls=81 tok_in=4759703
+cli-cli-13548 arm=a1 trial=4 all_pass=True dur=242.4s calls=48 tok_in=3784065
+cli-cli-13548 arm=a1 trial=2 all_pass=True dur=408.4s calls=82 tok_in=5319810
+cli-cli-13580 arm=a1 trial=0 all_pass=True dur=506.7s calls=94 tok_in=7448490
+cli-cli-13580 arm=a1 trial=1 all_pass=True dur=536.9s calls=92 tok_in=6829563
+cli-cli-13580 arm=a1 trial=2 all_pass=True dur=644.2s calls=122 tok_in=9196758
+cli-cli-13580 arm=a1 trial=4 all_pass=True dur=461.0s calls=94 tok_in=8526204
+cli-cli-13580 arm=a1 trial=3 all_pass=True dur=541.4s calls=93 tok_in=5145390
+cli-cli-13620 arm=a1 trial=0 all_pass=True dur=582.4s calls=106 tok_in=10671217
+cli-cli-13620 arm=a1 trial=2 all_pass=True dur=671.7s calls=122 tok_in=9581448
+cli-cli-13620 arm=a1 trial=3 all_pass=True dur=519.3s calls=77 tok_in=6326413
+cli-cli-13681 arm=a1 trial=0 all_pass=True dur=35.0s calls=7 tok_in=140826
+cli-cli-13620 arm=a1 trial=1 all_pass=True dur=831.7s calls=114 tok_in=14318005
+cli-cli-13681 arm=a1 trial=2 all_pass=True dur=27.8s calls=9 tok_in=192142
+cli-cli-13681 arm=a1 trial=1 all_pass=True dur=88.9s calls=14 tok_in=215045
+cli-cli-13681 arm=a1 trial=3 all_pass=True dur=83.9s calls=12 tok_in=293425
+cli-cli-13681 arm=a1 trial=4 all_pass=True dur=67.9s calls=14 tok_in=317490
+cli-cli-13722 arm=a1 trial=1 all_pass=True dur=81.5s calls=14 tok_in=282432
+cli-cli-13722 arm=a1 trial=0 all_pass=True dur=145.5s calls=34 tok_in=1179386
+cli-cli-13722 arm=a1 trial=2 all_pass=True dur=146.2s calls=20 tok_in=514474
+cli-cli-13620 arm=a1 trial=4 all_pass=True dur=517.3s calls=113 tok_in=12521195
+cli-cli-13722 arm=a1 trial=4 all_pass=True dur=81.0s calls=12 tok_in=245366
+cli-cli-13723 arm=a1 trial=0 all_pass=False dur=79.2s calls=21 tok_in=906852 FAILED:['pr.task_pass']
+cli-cli-13722 arm=a1 trial=3 all_pass=False dur=236.4s calls=20 tok_in=699433 FAILED:['pr.task_pass']
+cli-cli-13723 arm=a1 trial=1 all_pass=False dur=114.8s calls=34 tok_in=1541929 FAILED:['pr.task_pass']
+cli-cli-13723 arm=a1 trial=2 all_pass=True dur=427.2s calls=55 tok_in=3828896
+cli-cli-13723 arm=a1 trial=4 all_pass=False dur=331.2s calls=68 tok_in=4348326 FAILED:['pr.task_pass']
+cli-cli-13723 arm=a1 trial=3 all_pass=True dur=388.7s calls=68 tok_in=4560597
+cli-cli-13807 arm=a1 trial=0 all_pass=False dur=441.8s calls=45 tok_in=2428552 FAILED:['cli.builds']
+cli-cli-13807 arm=a1 trial=2 all_pass=True dur=484.8s calls=41 tok_in=2933541
+cli-cli-13807 arm=a1 trial=1 all_pass=True dur=683.6s calls=71 tok_in=6177076
+cli-cli-13823 arm=a1 trial=0 all_pass=True dur=210.0s calls=52 tok_in=2487856
+cli-cli-13807 arm=a1 trial=3 all_pass=True dur=560.9s calls=70 tok_in=5923553
+cli-cli-13807 arm=a1 trial=4 all_pass=True dur=611.7s calls=112 tok_in=8274050
+cli-cli-13823 arm=a1 trial=1 all_pass=True dur=299.4s calls=72 tok_in=3582348
+cli-cli-13823 arm=a1 trial=2 all_pass=True dur=206.0s calls=44 tok_in=2023766
+cli-cli-13864 arm=a1 trial=0 all_pass=True dur=115.4s calls=15 tok_in=506492
+cli-cli-13864 arm=a1 trial=1 all_pass=True dur=77.9s calls=12 tok_in=375720
+cli-cli-13823 arm=a1 trial=4 all_pass=True dur=238.9s calls=26 tok_in=1479459
+cli-cli-13823 arm=a1 trial=3 all_pass=True dur=351.9s calls=62 tok_in=3722595
+cli-cli-13864 arm=a1 trial=2 all_pass=True dur=78.5s calls=13 tok_in=421433
+cli-cli-13987 arm=a1 trial=0 all_pass=False dur=51.1s calls=9 tok_in=189640 FAILED:['pr.task_pass']
+cli-cli-13864 arm=a1 trial=4 all_pass=True dur=100.7s calls=15 tok_in=476778
+cli-cli-13864 arm=a1 trial=3 all_pass=True dur=128.2s calls=19 tok_in=533772
+cli-cli-13987 arm=a1 trial=2 all_pass=True dur=53.6s calls=12 tok_in=612767
+cli-cli-13987 arm=a1 trial=3 all_pass=True dur=49.1s calls=9 tok_in=327236
+cli-cli-13987 arm=a1 trial=1 all_pass=True dur=107.0s calls=14 tok_in=559753
+cli-cli-13987 arm=a1 trial=4 all_pass=True dur=39.8s calls=11 tok_in=348235
+cli-cli-13988 arm=a1 trial=0 all_pass=True dur=70.2s calls=13 tok_in=312838
+cli-cli-13988 arm=a1 trial=1 all_pass=True dur=48.3s calls=9 tok_in=185792
+cli-cli-13988 arm=a1 trial=2 all_pass=True dur=41.0s calls=8 tok_in=135470
+cli-cli-13988 arm=a1 trial=3 all_pass=True dur=41.3s calls=10 tok_in=201787
+cli-cli-13988 arm=a1 trial=4 all_pass=True dur=45.3s calls=11 tok_in=238263
+scenario                pass@1  trials  verdict
+cli-cli-13057             40%       5  KEEP
+cli-cli-13362             60%       5  KEEP
+cli-cli-13548             80%       5  KEEP
+cli-cli-13722             80%       5  KEEP
+cli-cli-13723             40%       5  KEEP
+cli-cli-13807             80%       5  KEEP
+cli-cli-13987             80%       5  KEEP
+cli-cli-13068            100%       5  ceiling — drop
+cli-cli-13412            100%       5  ceiling — drop
+cli-cli-13413            100%       5  ceiling — drop
+cli-cli-13418            100%       5  ceiling — drop
+cli-cli-13421            100%       5  ceiling — drop
+cli-cli-13430            100%       5  ceiling — drop
+cli-cli-13449            100%       5  ceiling — drop
+cli-cli-13471            100%       5  ceiling — drop
+cli-cli-13523            100%       5  ceiling — drop
+cli-cli-13541            100%       5  ceiling — drop
+cli-cli-13580            100%       5  ceiling — drop
+cli-cli-13620            100%       5  ceiling — drop
+cli-cli-13681            100%       5  ceiling — drop
+cli-cli-13823            100%       5  ceiling — drop
+cli-cli-13864            100%       5  ceiling — drop
+cli-cli-13988            100%       5  ceiling — drop
+cli-cli-13459              0%       5  floor — drop
+
+7 of 24 tasks land in [0.25, 0.80]
+  16 ceiling · 1 floor · 0 harness
+
+VERDICT: proceed with thin margin (7 usable). Consider a second fixture before generating contexts — it also unlocks the N-scaling claim a single fixture cannot reach.

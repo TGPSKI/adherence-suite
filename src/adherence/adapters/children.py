@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import sqlite3
 import sys
+import time
 from pathlib import Path
 
 
@@ -36,9 +37,26 @@ def db_path() -> Path:
     return Path(base) / "opencode" / "opencode.db"
 
 
-def children(root: str) -> list[tuple[str, str]]:
+def children(root: str, attempts: int = 5, delay: float = 0.6
+             ) -> list[tuple[str, str]]:
     """[(session_id, agent_name)] for every descendant of `root`, in
     creation order. Recursive: a subagent may dispatch its own."""
+    # Retried, because this runs the instant `opencode run` returns and a
+    # child session written moments earlier may not be visible yet. A
+    # single miss is not a small error: measured against the recording
+    # proxy, a trial reporting 26 calls had made 66, and two whole
+    # subagent sessions -- 40 calls, ~1.5M input tokens -- were absent
+    # from the transcript while the proxy had them all. E3 is a claim
+    # about exactly those tokens.
+    for attempt in range(attempts):
+        found = _query(root)
+        if found or attempt == attempts - 1:
+            return found
+        time.sleep(delay)
+    return []
+
+
+def _query(root: str) -> list[tuple[str, str]]:
     p = db_path()
     if not p.exists():
         return []

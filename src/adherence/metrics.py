@@ -183,7 +183,8 @@ def tool_calls(transcript) -> int:
                                     schema.TASK, schema.PROBE))
 
 
-def abandoned(transcript, expects_edit: bool = True) -> bool:
+def abandoned(transcript, expects_edit: bool = True,
+              completed: bool = True, observed_edits: int = -1) -> bool:
     """Design §5 control 3: flag trials that terminate with fewer than 2
     tool calls, or with no edit where an edit was the job. An arm whose
     token advantage comes from giving up sooner has to be caught here,
@@ -193,11 +194,29 @@ def abandoned(transcript, expects_edit: bool = True) -> bool:
     answered by a report and nothing else — s04's right answer is to STOP
     and edit nothing at all. Flagging those as abandoned would put a red
     column on compliant behaviour, and a flag that cries wolf is a flag
-    nobody reads by the time the PR-derived tasks arrive."""
+    nobody reads by the time the PR-derived tasks arrive.
+
+    `completed=False` means the harness stopped the trial -- a deadline, a
+    crashed adapter -- and the flag is withheld. Giving up and being cut
+    off look identical in a transcript that ends early, and conflating
+    them puts a give-up flag on the harness's own decision. Observed on a
+    45-minute trial killed at its ceiling with 27 MB of events: recorded
+    as abandoned, which is the opposite of what happened."""
+    if not completed:
+        return False
     if tool_calls(transcript) < 2:
         return True
     if not expects_edit:
         return False
+    # `observed_edits` is git's answer, and git outranks the transcript
+    # here. EDIT events are emitted only for tools that name a file in
+    # their input; an agent that writes through the shell -- a heredoc,
+    # `sed -i` -- changes files that git sees and the transcript does not.
+    # Measured: a trial with 26 calls, 35 tool calls and every check
+    # passing was flagged as having given up, because it did its editing
+    # in bash. -1 means nobody looked, so fall back to the transcript.
+    if observed_edits >= 0:
+        return observed_edits == 0
     return not any(e.get("type") == schema.EDIT for e in transcript)
 
 
@@ -216,7 +235,8 @@ def turns_until_first_compaction(transcript) -> int | None:
 
 
 def compute(transcript, floor: int = 0, duration_s: float | None = None,
-            expects_edit: bool = True) -> dict:
+            expects_edit: bool = True, completed: bool = True,
+            observed_edits: int = -1) -> dict:
     """All per-run cost metrics.
 
     `floor` is the per-arm harness floor from E5's calibration: the input
@@ -270,7 +290,26 @@ def compute(transcript, floor: int = 0, duration_s: float | None = None,
         "compactions": sum(1 for e in transcript
                            if e.get("type") == schema.COMPACTION),
         "turns_until_first_compaction": turns_until_first_compaction(transcript),
-        "abandoned": abandoned(transcript, expects_edit),
+        "abandoned": abandoned(transcript, expects_edit, completed,
+                               observed_edits),
+        # Dispatches the stream saw, against subagent sessions the
+        # transcript actually carries. They must match. When they do not,
+        # the child walker missed a session and every subagent number in
+        # this row is an under-report -- measured at 26 calls recorded
+        # against 66 the proxy handled, with two whole sessions absent.
+        # Recorded rather than corrected, because the proxy is the
+        # authority on the real figure (§3.2) and a silently patched
+        # transcript would hide the disagreement that says so.
+        "task_dispatches": sum(1 for e in transcript
+                               if e.get("type") == schema.TASK),
+        "subagent_capture_gap": max(
+            0, sum(1 for e in transcript if e.get("type") == schema.TASK)
+            - len({e.get("agent") for e in subagent_calls(transcript)})),
+        # What git saw, beside what the transcript claims. A gap between
+        # them means the agent edited through a tool the stream does not
+        # mark as an edit, which silently empties first_edit, probe_trail
+        # and every routing metric built on them.
+        "observed_edits": observed_edits,
         # §7: total_tokens is the only figure quotable as a saving;
         # per-agent numbers are diagnostics. Both are reported, and the
         # total leads.
@@ -323,13 +362,33 @@ def proxy_totals(rows: list[dict]) -> dict:
 
 
 def split_by_mark(rows: list[dict]) -> dict:
-    """Group proxy records by the trial mark the runner wrote before each
-    trial. Records before any mark land under ''."""
+    """Group proxy records by trial.
+
+    Two mechanisms, and the per-record one wins wherever it is present:
+
+    `run_id` is carried on the request path, so it is correct no matter how
+    many trials are in flight. `mark` is a single piece of proxy state set
+    between trials -- fine serially, meaningless under --jobs>1, where two
+    trials interleave into whichever label was set last.
+
+    Records with neither land under ''."""
     out, cur = {}, ""
     for r in rows:
         if r.get("type") == "mark":
             cur = r.get("label", "")
             out.setdefault(cur, [])
             continue
-        out.setdefault(cur, []).append(r)
+        key = trial_key(r.get("run_id") or r.get("mark") or cur)
+        out.setdefault(key, []).append(r)
     return out
+
+
+def trial_key(run_id: str) -> str:
+    """`scenario|arm|trial`, the unit a result row is joined on.
+
+    A run id carries a fourth field so two out-dirs for the same trial
+    (a retry, a re-run) stay distinct as processes. Calibration joins on
+    the trial, so the suffix is dropped here rather than at every call
+    site that would otherwise have to know about it."""
+    parts = (run_id or "").split("|")
+    return "|".join(parts[:3]) if len(parts) >= 3 else (run_id or "")

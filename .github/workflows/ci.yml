@@ -32,6 +32,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Floor and ceiling, deliberately. 3.10 is the oldest CPython still
+        # receiving security fixes and what older LTS distros ship, so it is
+        # the realistic worst case for someone running this harness on the
+        # box they already have; 3.14 is what the reference runs use. The
+        # suite is stdlib-only and uses no 3.11+ syntax, so the floor costs
+        # nothing to hold.
+        #
+        # Keep both. The one failure this matrix has caught was a race in
+        # the proxy-attribution selftest that is wrong on every version --
+        # 3.10's http.client keep-alive behaviour just made it likely enough
+        # to see. A narrower matrix would have hidden it.
         python-version: ["3.10", "3.14"]
 
     steps:

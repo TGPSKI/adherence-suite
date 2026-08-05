@@ -16,7 +16,7 @@ RUNNER   = $(PYTHON) -m adherence.runner --adapter $(ADAPTER) --model $(MODEL) \
              --trials $(TRIALS) $(ARMFLAGS) --out $(OUT)
 
 .PHONY: help check ci-local compile selftest schema lint table matrix report \
-	analyze floors live calibrate screen mkpr mkscenarios trees probe run all clean
+	analyze floors live tasks design stop clean-runs calibrate screen mkpr mkscenarios trees probe run all clean
 
 help:
 	@printf '%s\n' \
@@ -28,7 +28,14 @@ help:
 		'  make ci-local [JOB=lint]   run CI'"'"'s own steps locally, from the workflow file' \
 		'' \
 		'viewing — read-only, never spends a GPU-second:' \
+		'  make tasks                 what each scenario asks for and how' \
+		'                             it is judged (no run data)' \
+		'  make design                what each arm is + the ground rules' \
 		'  make live                  what is running right now, one-shot' \
+		'  make stop [YES=1]          stop a run, kill orphans, sweep temp' \
+		'                             (prints a plan unless YES=1; never' \
+		'                             deletes results -- rm those yourself)' \
+		'  make clean-runs            delete sandboxes/out-dirs from dead runs' \
 		'  make table [FILTER=a3/*]   one-shot snapshot (NOCOLOR=1 to strip ANSI)' \
 		'  make matrix [FILTER=a3/*]  interactive results matrix' \
 		'                             FILES= scopes to one run (default: all of' \
@@ -84,8 +91,23 @@ lint:
 
 # --- viewing ---
 
+## Stop a run and reclaim what it left. Never deletes results.
+stop:
+	@$(PY) -m adherence.stoprun --out $(or $(OUT),runs/probe.jsonl) $(if $(YES),--yes,)
+
+tasks:
+	@$(PY) -m adherence.tasks
+
+design:
+	@$(PY) -m adherence.design
+
 live:
 	@$(PY) -m adherence.live
+
+## Delete sandboxes and out-dirs left by finished or killed runs.
+## Refuses while anything is running.
+clean-runs:
+	@$(PY) -m adherence.live --clean
 
 table:
 	@FILTER="$(FILTER)" REF="$(REF)" PROXY="$(PROXY)" FILES="$(FILES)" \

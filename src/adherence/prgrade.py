@@ -55,17 +55,33 @@ def grade(sandbox, transcript, final) -> list[Check]:
 
     changed = set(git_changed_files(sandbox))
     real = set(task.get("code_files", []))
+    cli_graded = task.get("grader") == "cli"
 
     # --- did it do the job the PR did ---------------------------------
+    # Under the unit grader this is a real failure: the PR's own tests are
+    # the verdict, and an agent that touched none of the PR's files did not
+    # do the work. Under the CLI grader it is REPORTED, not failed --
+    # `cli.surface` already proves the shipped behaviour flag-for-flag
+    # against the PR's own binary, and insisting on the same file set
+    # would smuggle back the "match the maintainers' structure" demand
+    # that Amendment 2 exists to remove.
     hit = sorted(changed & real)
     coverage = len(hit) / len(real) if real else 0.0
-    checks.append(ok("pr.diff_coverage",
-                     f"touched {len(hit)}/{len(real)} of the real diff's "
-                     f"files ({coverage:.0%}): {hit[:6]}")
-                  if hit else
-                  bad("pr.diff_coverage",
-                      f"touched none of the {len(real)} files the real PR "
-                      f"changed; agent touched {sorted(changed)[:6]}"))
+    if hit:
+        checks.append(ok("pr.diff_coverage",
+                         f"touched {len(hit)}/{len(real)} of the real diff's "
+                         f"files ({coverage:.0%}): {hit[:6]}"))
+    elif cli_graded:
+        checks.append(skip("pr.diff_coverage",
+                           f"touched none of the {len(real)} files the real "
+                           f"PR changed. Reported, not failed: this task is "
+                           f"graded at the command line, where a different "
+                           f"file layout with the same behaviour is a valid "
+                           f"implementation"))
+    else:
+        checks.append(bad("pr.diff_coverage",
+                          f"touched none of the {len(real)} files the real "
+                          f"PR changed; agent touched {sorted(changed)[:6]}"))
 
     extra = sorted(changed - real)
     checks.append(skip("pr.scope",
@@ -96,6 +112,32 @@ def grade(sandbox, transcript, final) -> list[Check]:
         checks.append(skip("pr.route",
                            "no probes recorded before the first edit; the "
                            "adapter may not emit probe events"))
+
+    # --- CLI-boundary grading, when the unit tests cannot be fair ------
+    # A feature PR's tests reference symbols the PR introduces, so they do
+    # not compile against an agent that named its internals differently --
+    # measured: 0-5% on every such task, on runs that had already passed
+    # diff_coverage. mkpr marks those tasks, and they are graded against
+    # what the PR publicly promises instead: the merge commit's own binary
+    # is the oracle, and the comparison is flag-for-flag at the command
+    # line. Nothing is added to the prompt; the grader stops asking a
+    # question the agent was never given the means to answer.
+    if task.get("grader") == "cli":
+        from adherence.cligrade import grade_cli
+        repo = task.get("repo") or ""
+        merge = task.get("merge_commit", "")
+        if not repo or not merge:
+            checks.append(skip("cli.surface",
+                               "task marked cli-graded but carries no repo "
+                               "mirror or merge commit"))
+            return checks
+        mirror = Path(repo)
+        if not mirror.is_absolute():
+            from adherence import REPO_ROOT
+            mirror = REPO_ROOT / mirror
+        checks += grade_cli(sandbox, mirror, merge,
+                            task.get("code_files") or [])
+        return checks
 
     # --- the maintainers' own tests decide it -------------------------
     test_files = task.get("test_files") or []

@@ -23,6 +23,8 @@ import errno
 import glob
 import json
 import os
+import sqlite3
+import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -43,13 +45,61 @@ def out_dirs(tmp: str | None = None):
 
 
 def _alive(pid: int) -> bool:
-    if not pid:
+    """Does this pid exist? POSIX only -- see below.
+
+    `os.kill(pid, 0)` is the standard existence probe on POSIX, where
+    signal 0 is "check, do not send". On Windows it is not a probe at all:
+    `signal.CTRL_C_EVENT == 0`, so the call delivers a real Ctrl-C to the
+    target's console group. The selftest wrote a marker carrying its own
+    pid, this function checked it, and the check raised KeyboardInterrupt
+    inside an unrelated subprocess several tests later. Sixteen seconds
+    into the Windows job, with a traceback pointing at code that had
+    nothing to do with it.
+
+    A liveness check must never be able to affect what it observes, so on
+    Windows it declines to answer and the caller falls back to evidence
+    that cannot misfire."""
+    if not pid or os.name != "posix":
         return False
     try:
         os.kill(pid, 0)
     except OSError as e:
         return e.errno == errno.EPERM      # exists, not ours
     return True
+
+
+def busy_out_dirs() -> set[str] | None:
+    """Out-dirs named on the command line of some live process.
+
+    The runner passes the out-dir to the adapter as an argument, so it is
+    right there in `ps` for the whole life of the trial. That makes it a
+    direct liveness signal, and a much better one than the fallback it
+    replaces: without a marker there is no pid, so liveness was inferred
+    from "the stream file moved recently", which reports a run killed ten
+    seconds ago as still running for another three minutes. Observed
+    exactly that after a teardown -- four rows claiming to run while `ps`
+    showed nothing at all.
+
+    None means ps was unavailable and the caller should fall back."""
+    try:
+        out = subprocess.run(["ps", "-eo", "args"], capture_output=True,
+                             text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    busy = set()
+    for line in out.stdout.splitlines():
+        for tok in line.split():
+            if "adh-out-" in tok:
+                # prompt.txt lives inside the out-dir; take the directory.
+                p = tok.rstrip("/")
+                if not p.endswith("adh-out-") and "/adh-out-" in f"/{p}":
+                    while p and "adh-out-" not in os.path.basename(p):
+                        p = os.path.dirname(p)
+                    if p:
+                        busy.add(p)
+    return busy
 
 
 # The stream nests everything one level down under "part"; the useful
@@ -82,6 +132,7 @@ def _stream(path: Path) -> dict:
     spawns: list[str] = []
     first_ts = last_ts = 0
     partial = 0
+    root_sid = ""
     try:
         with open(path, errors="replace") as f:
             for line in f:
@@ -99,6 +150,8 @@ def _stream(path: Path) -> dict:
                     first_ts = first_ts or ts
                     last_ts = ts
                 sid = e.get("sessionID") or ""
+                if sid and not root_sid:
+                    root_sid = sid
                 t = e.get("type")
                 if t == "step_finish":
                     calls += 1
@@ -139,7 +192,164 @@ def _stream(path: Path) -> dict:
             "sessions": len(sessions), "subagent_calls":
                 sum(sorted(sessions.values())[:-1]) if len(sessions) > 1 else 0,
             "first_ts": first_ts, "last_ts": last_ts,
-            "partial_lines": partial}
+            "root_session": root_sid, "partial_lines": partial}
+
+
+def _subagents(out_dir: Path, root_session: str) -> dict:
+    """Child sessions this trial has dispatched, read live.
+
+    A subagent runs in its OWN opencode session, and neither the root
+    stream nor the root export carries a single one of its inference calls
+    -- measured at 3.1x under-report on s13. So the stream this view reads
+    cannot see subagent cost at all, and reporting its totals without
+    saying so would understate exactly the number E3 is a claim about.
+
+    The runner gives every trial its own XDG_DATA_HOME under the out-dir,
+    so opencode's store is right here while the run is live. Read-only and
+    best-effort: the writer is active, the schema is private and may move
+    between versions, and a viewer must never block a run. On any failure
+    this reports nothing rather than a number it cannot stand behind."""
+    db = out_dir / "xdg" / "data" / "opencode" / "opencode.db"
+    empty = {"sessions": [], "root": root_session, "readable": False,
+             "calls": 0, "tok_in": 0, "tok_out": 0}
+    if not db.exists():
+        return dict(empty)
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        con.execute("PRAGMA query_only=ON")
+        rows = list(con.execute(
+            "SELECT id, parent_id, COALESCE(agent,'') FROM session "
+            "WHERE parent_id IS NOT NULL ORDER BY time_created ASC"))
+        kids = [(sid, agent) for sid, _parent, agent in rows]
+        calls = tok_in = tok_out = 0
+        if kids:
+            ids = [s for s, _a in kids]
+            placeholders = ",".join("?" * len(ids))
+            q = f"SELECT data FROM part WHERE session_id IN ({placeholders})"
+            for (data,) in con.execute(q, ids):
+                try:
+                    d = json.loads(data)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                # Same event the root stream calls step_finish; the store
+                # spells it with a hyphen.
+                if d.get("type") == "step-finish":
+                    calls += 1
+                    tk = d.get("tokens") or {}
+                    tok_in += tk.get("input") or 0
+                    tok_out += tk.get("output") or 0
+        con.close()
+    except Exception:
+        return dict(empty)
+    return {"sessions": kids, "root": root_session, "readable": True,
+            "calls": calls, "tok_in": tok_in, "tok_out": tok_out}
+
+
+MAX_BODY = 20000
+
+
+def _pretty(body) -> str:
+    """Readable text for an expanded event.
+
+    Two jobs. Keep the line structure -- a file listing, a diff and a stack
+    trace are mostly structure, and joining them into one paragraph throws
+    away the thing being read. And re-indent JSON: a tool's input arrives
+    as a dict and its output is often a serialized blob, both of which are
+    a wall on one line and obvious over twelve."""
+    if isinstance(body, (dict, list)):
+        try:
+            return json.dumps(body, indent=2)[:MAX_BODY]
+        except (TypeError, ValueError):
+            return str(body)[:MAX_BODY]
+    text = str(body or "")
+    stripped = text.strip()
+    if stripped[:1] in "[{" and stripped[-1:] in "]}":
+        try:
+            return json.dumps(json.loads(stripped), indent=2)[:MAX_BODY]
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return text.replace("\r\n", "\n").replace("\r", "\n")[:MAX_BODY]
+
+
+def preview(e: dict, width: int) -> str:
+    """One line for the list: the first non-empty line of the body."""
+    for ln in (e.get("text") or "").splitlines():
+        ln = ln.strip()
+        if ln:
+            return ln[:width]
+    return ""
+
+
+def activity(out_dir: Path, limit: int = 400) -> list[dict]:
+    """The trial's recent events, with tool output.
+
+    The NDJSON stream carries a tool call's *input* and status but not
+    what it returned -- so a viewer built on the stream alone can say "it
+    ran go test" and never what go test said, which is the one thing worth
+    knowing while a run is in flight. opencode's store keeps the output,
+    and the runner puts that store in the out-dir.
+
+    Read-only and best-effort, like everything else here: the writer is
+    live and the schema is private."""
+    db = out_dir / "xdg" / "data" / "opencode" / "opencode.db"
+    if not db.exists():
+        return []
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        con.execute("PRAGMA query_only=ON")
+        kids = {s for (s,) in con.execute(
+            "SELECT id FROM session WHERE parent_id IS NOT NULL")}
+        rows = list(con.execute(
+            "SELECT id, session_id, data, time_created FROM part "
+            "ORDER BY time_created DESC LIMIT ?", (limit * 6,)))
+        con.close()
+    except Exception:
+        return []
+
+    out = []
+    for pid, sid, data, ts in rows:
+        try:
+            d = json.loads(data)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        kind = d.get("type")
+        who = "subagent" if sid in kids else "agent"
+        if kind == "tool":
+            st = d.get("state") or {}
+            inp = st.get("input") or {}
+            body = st.get("error") or st.get("output") or ""
+            out.append({
+                # The store's own primary key. A viewer anchored to a list
+                # POSITION follows "whatever is newest", so a new event
+                # arriving while you read one swaps it out from under you.
+                "id": pid,
+                "ts": ts, "who": who, "kind": "tool",
+                "name": d.get("tool") or "?",
+                "target": _target(inp),
+                "status": st.get("status") or "",
+                # Structure preserved. Collapsing whitespace made every
+                # JSON blob and every file listing one unreadable line --
+                # and structure is most of what a tool result IS.
+                "text": _pretty(body),
+                "input": _pretty(inp) if inp else "",
+                "failed": bool(st.get("error")),
+            })
+        elif kind == "text":
+            body = (d.get("text") or "").strip()
+            if body:
+                out.append({"id": pid, "ts": ts, "who": who, "kind": "text",
+                            "name": "", "target": "", "status": "",
+                            "text": _pretty(d.get("text") or ""),
+                            "input": "", "failed": False})
+    out.sort(key=lambda e: e["ts"])
+    out = out[-limit:]
+    # Absolute position in the run, counted from the start. A reader
+    # scanning a newest-first list needs a number that means something
+    # other than "how far down the screen you are" -- this one says how
+    # many events the trial has produced and where this sits among them.
+    for i, e in enumerate(out, 1):
+        e["n"] = i
+    return out
 
 
 def _scenario_info(scenario: str, root: Path) -> dict:
@@ -177,6 +387,7 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
     """One record per run currently in flight, newest activity first."""
     root = root or REPO_ROOT
     now = now or time.time()
+    busy = busy_out_dirs()
     runs = []
     for d in out_dirs(tmp):
         p = Path(d)
@@ -202,9 +413,18 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
         # transcript.jsonl is written after the harness returns, so its
         # presence means the agent is done and grading is under way.
         graded = (p / "transcript.jsonl").is_file()
+        # Same reason as runner.wait_or_kill: the root stream goes silent
+        # for the whole time a subagent is working, so a delegating trial
+        # reads as stalled when it is the busiest thing on the machine.
+        # opencode's store runs in SQLite WAL mode, so live writes land in
+        # `-wal` and the main .db mtime only moves on checkpoint -- measured
+        # 234s stale while `-wal` was 33s fresh. Watching the .db alone made
+        # a delegating trial look idle for a whole checkpoint interval.
+        store = p / "xdg" / "data" / "opencode" / "opencode.db"
+        watched = [stdout, store, Path(str(store) + "-wal"), p]
         try:
-            touched = max(os.path.getmtime(x) for x in
-                          (stdout, p) if os.path.exists(x))
+            touched = max(os.path.getmtime(x) for x in watched
+                          if os.path.exists(x))
         except (OSError, ValueError):
             touched = 0.0
         age = now - touched if touched else 1e9
@@ -214,11 +434,15 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
         except OSError:
             elapsed = 0.0
 
-        # No marker means no pid to check, so liveness falls back to "the
-        # stream moved recently", which is the same evidence a viewer would
-        # use by eye.
-        alive = (_alive(int(m["pid"])) if m.get("pid")
-                 else age < STALE_S)
+        # Liveness, best evidence first: a process still naming this
+        # out-dir, then the runner's recorded pid, and only if `ps` is
+        # unavailable the weak "stream moved recently" guess.
+        if busy is not None:
+            alive = d in busy
+        elif m.get("pid") and os.name == "posix":
+            alive = _alive(int(m["pid"]))
+        else:
+            alive = age < STALE_S
         if age > ABANDONED_S and not alive:
             continue                    # debris from a killed run
 
@@ -229,9 +453,16 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
         if st["first_ts"]:
             elapsed = max(elapsed, (now * 1000 - st["first_ts"]) / 1000.0)
 
+        kids = _subagents(p, st.get("root_session", ""))
         timeout = int(m.get("timeout") or 0)
-        if graded:
+        if graded and alive:
             state = "grading"
+        elif graded:
+            # A transcript with no live process is a FINISHED trial whose
+            # directory was kept (--keep-sandbox) or not yet swept. It used
+            # to read "grading" forever, with a deadline clock still
+            # ticking past 100% against a deadline that no longer applies.
+            state = "done"
         elif not alive:
             state = "dead"
         elif age > STALE_S:
@@ -255,10 +486,29 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
             # --timeout overrides scenario.yaml, so substituting the
             # scenario's value would overstate the remaining budget on
             # exactly the runs closest to being killed.
-            "budget": (elapsed / timeout) if timeout else None,
+            # The adapter deadline only governs a trial that is still
+            # generating. Grading is unbounded and a finished trial is not
+            # racing anything, so a percentage there is meaningless -- it
+            # read 104% on a run that had already stopped.
+            "budget": ((min(elapsed / timeout, 1.0) if timeout else None)
+                       if state in ("running", "stalled") else None),
             "idle_s": age,
             "state": state,
             "unlabelled": bool(m.get("unlabelled")),
+            # Dispatched subagents, from opencode's own store. `tok_in`
+            # above is ROOT ONLY -- their calls are in separate sessions
+            # the root stream never sees.
+            "child_sessions": len(kids["sessions"]),
+            "child_agents": [a for _s, a in kids["sessions"] if a],
+            "children_readable": kids["readable"],
+            "child_calls": kids["calls"],
+            "child_tok_in": kids["tok_in"],
+            "child_tok_out": kids["tok_out"],
+            # The number E3 is actually a claim about: parent + every
+            # child. Quoting the root total alone would confirm "subagent
+            # handoff is 0-cost" by leaving the cost out of the number.
+            "total_calls": st["calls"] + kids["calls"],
+            "total_tok_in": st["tok_in"] + kids["tok_in"],
             "info": _scenario_info(m.get("scenario", ""), root),
             **st,
         })
@@ -277,8 +527,9 @@ def summarize(runs) -> dict:
         "running": sum(1 for r in runs if r["state"] == "running"),
         "grading": sum(1 for r in runs if r["state"] == "grading"),
         "stalled": sum(1 for r in runs if r["state"] in ("stalled", "dead")),
-        "calls": sum(r["calls"] for r in runs),
-        "tok_in": sum(r["tok_in"] for r in runs),
+        "calls": sum(r["total_calls"] for r in runs),
+        "tok_in": sum(r["total_tok_in"] for r in runs),
+        "child_calls": sum(r["child_calls"] for r in runs),
     }
 
 
@@ -295,21 +546,78 @@ def fmt_age(s) -> str:
     return f"{s // 3600}h{(s % 3600) // 60:02d}m"
 
 
+def sweep(tmp: str | None = None, dry: bool = False) -> tuple[int, int]:
+    """Remove sandboxes and out-dirs no live process is using.
+
+    A trial that completes cleans up after itself; one that is killed does
+    not, and the leftovers are not harmless. They are what the live view
+    reads, so a torn-down run keeps rendering as rows long after it is
+    gone, and at ~30MB of git checkout apiece they are not free either.
+
+    Refuses while anything is running, because the only way to decide a
+    directory is dead is to know nothing is using it."""
+    import shutil
+    busy = busy_out_dirs()
+    if busy is None:
+        raise RuntimeError("cannot enumerate processes; refusing to delete "
+                           "directories that might be in use")
+    if busy:
+        raise RuntimeError(
+            f"{len(busy)} run(s) still active. Stop them first -- deleting a "
+            f"sandbox under a running agent produces a garbage transcript "
+            f"and a result row that looks real.")
+    root = tmp or tempfile.gettempdir()
+    freed = n = 0
+    for d in sorted(glob.glob(os.path.join(root, "adh-*"))):
+        try:
+            size = sum(f.stat().st_size for f in Path(d).rglob("*")
+                       if f.is_file())
+        except OSError:
+            size = 0
+        n += 1
+        freed += size
+        if not dry:
+            shutil.rmtree(d, ignore_errors=True)
+    return n, freed
+
+
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--clean", action="store_true",
+                    help="delete sandboxes and out-dirs from finished or "
+                         "killed runs; refuses while anything is running")
+    ap.add_argument("--dry-run", action="store_true")
+    a = ap.parse_args()
+    if a.clean:
+        try:
+            n, freed = sweep(dry=a.dry_run)
+        except RuntimeError as e:
+            print(e)
+            return 1
+        verb = "would remove" if a.dry_run else "removed"
+        print(f"{verb} {n} director{'y' if n == 1 else 'ies'}, "
+              f"{freed / 1e6:.0f} MB")
+        return 0
+
     runs = snapshot()
     if not runs:
         print("nothing in flight")
         return 0
     s = summarize(runs)
     print(f"{s['running']} running, {s['grading']} grading, "
-          f"{s['stalled']} stalled — {s['calls']} calls, "
-          f"{s['tok_in']:,} input tokens so far\n")
+          f"{s['stalled']} stalled — {s['calls']} calls "
+          f"({s['child_calls']} in subagents), "
+          f"{s['tok_in']:,} input tokens so far\n"
+          f"calls and tokens are parent + children (§7)\n")
     print(f"{'scenario':<20}{'arm':>4}{'t':>3}{'state':>9}{'calls':>7}"
-          f"{'tools':>7}{'tok_in':>11}{'elapsed':>9}{'budget':>8}  activity")
+          f"{'tools':>7}{'sub':>5}{'tok_in':>12}{'elapsed':>9}"
+          f"{'budget':>8}  activity")
     for r in runs:
         print(f"{r['scenario'][:19]:<20}{r['arm']:>4}{r['trial']:>3}"
-              f"{r['state']:>9}{r['calls']:>7}{r['tools']:>7}"
-              f"{r['tok_in']:>11,}{fmt_age(r['elapsed_s']):>9}"
+              f"{r['state']:>9}{r['total_calls']:>7}{r['tools']:>7}"
+              f"{r['child_sessions']:>5}"
+              f"{r['total_tok_in']:>12,}{fmt_age(r['elapsed_s']):>9}"
               f"{fmt_budget(r['budget']):>8}  {r['last_tool'][:50]}")
     if any(r["unlabelled"] for r in runs):
         print("\n? arm/trial: run started before the runner wrote its marker; "

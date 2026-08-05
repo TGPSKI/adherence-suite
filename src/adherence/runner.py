@@ -274,6 +274,88 @@ def install_reapers() -> None:
                 signal.signal(sig, _reap_all)
 
 
+def per_trial_bench_config(out_dir: Path, run_id: str) -> Path | None:
+    """A copy of the harness config whose baseURL names this trial.
+
+    The proxy is authoritative for token counts (H4), but it could only
+    attribute calls to a trial via a single global mark -- so under
+    --jobs>1 the runner skipped marking entirely rather than write an
+    attribution it knew was wrong, and the gate could not be measured in
+    parallel at all. That was a real limitation of the design, recorded as
+    "the second cost of parallelism".
+
+    It does not have to be. Nothing in an inference request body identifies
+    its trial, but the request *path* is ours: routing this trial through
+    `<proxy>/__run/<run_id>/v1` makes attribution arrive with the call.
+    The proxy strips the prefix before forwarding, so upstream sees exactly
+    what it saw before.
+
+    Returns None when no proxy is in use, leaving the adapter on whatever
+    config it would otherwise have picked."""
+    base = os.environ.get("ADH_PROXY")
+    src = os.environ.get("ADH_BENCH_CONFIG") or str(ROOT / "bench" /
+                                                    "opencode-bench.json")
+    if not base or not Path(src).is_file():
+        return None
+    try:
+        cfg = json.loads(Path(src).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    root = base.rsplit("/v1", 1)[0].rstrip("/")
+    tagged = f"{root}/__run/{urllib.parse.quote(run_id, safe='')}/v1"
+    changed = False
+    for prov in (cfg.get("provider") or {}).values():
+        opts = prov.get("options") if isinstance(prov, dict) else None
+        if isinstance(opts, dict) and opts.get("baseURL"):
+            opts["baseURL"] = tagged
+            changed = True
+    if not changed:
+        return None
+    dest = out_dir / "opencode-bench.json"
+    dest.write_text(json.dumps(cfg, indent=2))
+    return dest
+
+
+def salvage(adapter: Path, sandbox: Path, model: str, prompt_file: Path,
+            out_dir: Path, target_agent: str, env: dict) -> int:
+    """Convert a killed trial's event stream into a transcript.
+
+    The adapter writes its transcript at the end, so killing it at a
+    deadline discards everything: a trial that ran 45 minutes and left
+    27,623,328 bytes of events on disk was recorded as `calls=0, tok=0`.
+    For a cost experiment that is not a missing row, it is a measurement
+    thrown away.
+
+    The trial stays `ungradeable` either way -- the harness did not let it
+    finish, so it is not a model result and exclusion criterion 1 still
+    drops it. What salvage buys is the ability to say what an arm was
+    spending when the ceiling stopped it, which is exactly the question a
+    ceiling makes urgent.
+
+    Returns the number of transcript events recovered."""
+    stream = out_dir / "stdout.txt"
+    if not stream.is_file() or stream.stat().st_size == 0:
+        return 0
+    if (out_dir / "transcript.jsonl").is_file():
+        return 0                        # the adapter got there first
+    salvage_env = dict(env)
+    salvage_env["ADH_SALVAGE"] = "1"
+    try:
+        subprocess.run(
+            [str(adapter), str(sandbox), model, str(prompt_file),
+             str(out_dir), target_agent],
+            capture_output=True, text=True, timeout=300, env=salvage_env,
+            **({"start_new_session": True} if os.name == "posix" else {}))
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    try:
+        return sum(1 for line in (out_dir / "transcript.jsonl").read_text()
+                   .splitlines() if line.strip())
+    except OSError:
+        return 0
+
+
 def wait_or_kill(proc, out_dir: Path, hard_s: int, idle_s: int):
     """Wait for the adapter, killing it only for a reason worth killing for.
 
@@ -297,18 +379,45 @@ def wait_or_kill(proc, out_dir: Path, hard_s: int, idle_s: int):
     adapter's trap a window to convert whatever the stream captured into a
     transcript, then SIGKILL for anything that ignored it."""
     stream = out_dir / "stdout.txt"
+    # A subagent runs in its OWN opencode session, and the root stream
+    # carries none of its events -- so a trial that dispatches one and
+    # waits looks completely idle on stdout.txt for as long as the child
+    # works. Observed live: parent 0 calls, subagent 5 calls and 206,689
+    # tokens, forty tool calls deep, with the stream silent for 3m27s.
+    # Watching only the stream would kill that run as hung, and it would do
+    # it *more* to the arms that route to subagents -- which are the arms
+    # under test. Progress is either file moving.
+    store = out_dir / "xdg" / "data" / "opencode" / "opencode.db"
+    # WAL mode: the main .db neither grows nor restamps between
+    # checkpoints, so summing it alone made a busy subagent look idle.
+    wal = Path(str(store) + "-wal")
     t0 = time.time()
-    last_size, last_change = -1, t0
+    last_size, last_change, real_bytes = -1, t0, 0
+
+    def _activity():
+        """(fingerprint, bytes). The fingerprint only has to CHANGE when
+        work happens; the byte count is what a human reads, so they are
+        kept apart -- printing the fingerprint as a byte count produced
+        '1,785,879,733 bytes' for a 27 MB stream."""
+        import contextlib
+        fp = 0
+        size = 0
+        for f in (stream, store, wal):
+            with contextlib.suppress(OSError):
+                st = f.stat()
+                # size AND mtime: a WAL overwritten in place can hold its
+                # size while still taking writes.
+                fp += st.st_size + int(st.st_mtime)
+                size += st.st_size
+        return fp, size
+
     while True:
         try:
             return proc.communicate(timeout=2.0)[1], None
         except subprocess.TimeoutExpired:
             pass
         now = time.time()
-        try:
-            size = stream.stat().st_size if stream.exists() else 0
-        except OSError:
-            size = last_size
+        size, real_bytes = _activity()
         if size != last_size:
             last_size, last_change = size, now
 
@@ -316,12 +425,12 @@ def wait_or_kill(proc, out_dir: Path, hard_s: int, idle_s: int):
         elapsed = now - t0
         why = None
         if idle_s and idle > idle_s and last_size >= 0:
-            why = (f"adapter idle {int(idle)}s (no stream activity; limit "
-                   f"{idle_s}s) after {int(elapsed)}s and {last_size:,} "
-                   f"bytes of events")
+            why = (f"adapter idle {int(idle)}s (no event-stream and no "
+                   f"session-store activity; limit {idle_s}s) after "
+                   f"{int(elapsed)}s and {real_bytes:,} bytes")
         elif hard_s and elapsed > hard_s:
             why = (f"adapter hit the hard ceiling of {hard_s}s while still "
-                   f"active ({last_size:,} bytes of events, last advanced "
+                   f"active ({real_bytes:,} bytes of events, last advanced "
                    f"{int(idle)}s ago)")
         if not why:
             continue
@@ -645,6 +754,9 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
     # start_new_session puts the adapter in its own process group so a
     # deadline can kill everything it spawned. See kill_process_group.
     env["ADH_RUN_ID"] = run_id
+    cfg = per_trial_bench_config(out_dir, run_id)
+    if cfg:
+        env["ADH_BENCH_CONFIG"] = str(cfg)
     proc = subprocess.Popen(
         [str(adapter), str(sandbox), model, str(prompt_file), str(out_dir),
          target_agent],
@@ -657,6 +769,15 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
         _LIVE_PROCS.discard(proc)
     adapter_ok = why is None and proc.returncode == 0
     adapter_err = why or (err or "")[-2000:]
+    if not adapter_ok:
+        # A killed trial still did its work; the harness just took away the
+        # step that writes it down. Re-invoke the adapter in salvage mode to
+        # convert whatever the stream captured. Best-effort and bounded --
+        # the run is already over and nothing downstream may block on it.
+        saved = salvage(adapter, sandbox, model, prompt_file, out_dir,
+                        target_agent, env)
+        if saved:
+            adapter_err += f"; salvaged {saved} transcript event(s)"
     duration = time.time() - t0
 
     transcript = gradelib.load_transcript(out_dir / "transcript.jsonl")
@@ -709,7 +830,12 @@ def run_one(scen_dir: Path, adapter: Path, model: str, keep: bool,
         metrics=metrics.compute(transcript, floor=floor,
                                 duration_s=round(duration, 1),
                                 expects_edit=bool(int(
-                                    meta.get("expects_edit", 1)))),
+                                    meta.get("expects_edit", 1))),
+                                # A trial the harness stopped cannot be
+                                # said to have given up.
+                                completed=adapter_ok,
+                                observed_edits=len(
+                                    gradelib.git_changed_files(sandbox))),
         provenance=provenance(scen_dir, meta, arm, arms_dir, adapter, harness),
         fixture=str(meta.get("fixture", "")),
         purpose=purpose,
@@ -844,9 +970,11 @@ def main():
               + (f"  [out_dir={r['out_dir']}]" if r.get("out_dir") else ""))
 
     if args.jobs > 1 and os.environ.get("ADH_PROXY"):
-        print("WARNING: --jobs>1 with a recording proxy — per-trial proxy "
-              "attribution is unavailable and trial marks are skipped. Run "
-              "the H4 calibration serially.", file=sys.stderr)
+        print("note: --jobs>1 with a recording proxy. Trial marks are "
+              "skipped (they are one piece of shared state and two trials "
+              "would interleave), but each trial routes through its own "
+              "/__run/<id> path, so per-trial attribution is exact and the "
+              "H4 gate is measurable in parallel.", file=sys.stderr)
 
     install_reapers()
     with open(args.out, "a") as out:
@@ -869,10 +997,23 @@ def main():
             # Threads, not processes: every trial is dominated by waiting
             # on a subprocess and on the endpoint, so the GIL is not the
             # constraint and the shared output file needs no IPC.
-            from concurrent.futures import ThreadPoolExecutor
+            from concurrent.futures import ThreadPoolExecutor, as_completed
             lock = threading.Lock()
             with ThreadPoolExecutor(max_workers=args.jobs) as pool:
-                for item, r, errs in pool.map(one, work):
+                futures = [pool.submit(one, it) for it in work]
+                # as_completed, NOT map: map yields in SUBMISSION order, so
+                # one slow trial buffers every later result inside the
+                # executor. Observed on the probe -- a trial finished, its
+                # out-dir was cleaned up, and its row stayed unwritten
+                # behind two 20-minute runs: invisible to the live view,
+                # missing from the progress count, and lost outright if the
+                # runner were killed. A finished trial is written now.
+                for fut in as_completed(futures):
+                    try:
+                        item, r, errs = fut.result()
+                    except Exception as e:          # noqa: BLE001
+                        print(f"  trial raised: {e}", file=sys.stderr)
+                        continue
                     with lock:
                         emit(out, item, r, errs)
         else:

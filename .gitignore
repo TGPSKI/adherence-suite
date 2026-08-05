@@ -74,3 +74,4 @@ proxy*.jsonl
 scoreboard.md
 
 *.bak
+_private/

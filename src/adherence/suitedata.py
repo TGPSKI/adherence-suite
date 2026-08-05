@@ -87,6 +87,9 @@ def load_rows(paths=None):
                     r.setdefault("arm", "-")
                     r.setdefault("metrics", {})
                     r["_src"] = os.path.basename(p)
+                    # File order is arrival order for an append-only log,
+                    # which is the only "most recent" a viewer can know.
+                    r["_seq"] = len(rows)
                     rows.append(r)
         except (OSError, json.JSONDecodeError):
             continue
@@ -100,9 +103,46 @@ def newest_mtime(paths=None):
 
 # ---------- cells ----------
 
+def is_ungradeable(row) -> bool:
+    """Did the harness fail to produce something judgeable?
+
+    One definition, used by both the `ung` column and the pass rate, so a
+    row cannot be shown as ungradeable and simultaneously counted as a
+    failure in the rate beside it. Mirrors analyze.harness_excluded --
+    the registered analysis stays authoritative; this exists so the
+    viewer cannot disagree with it."""
+    if row.get("schema_errors"):
+        return True
+    return any(c.get("name") == "adapter" and c.get("status") != "pass"
+               for c in row.get("checks") or [])
+
+
 def _med(vals):
     vals = [v for v in vals if v is not None]
     return st.median(vals) if vals else 0
+
+
+def _avg(vals):
+    vals = [v for v in vals if v is not None]
+    return sum(vals) / len(vals) if vals else 0
+
+
+def _p90(vals):
+    """90th percentile, nearest-rank.
+
+    Reported next to the median rather than instead of it. A cost
+    comparison is made on medians because between-scenario variance is
+    enormous, but a median hides the runs that actually hurt: the trial
+    that explored for forty calls, the one that timed out. The gap between
+    the two is the thing to look at -- a treatment that halves the median
+    and doubles the tail has not made anything cheaper."""
+    vals = sorted(v for v in vals if v is not None)
+    if not vals:
+        return 0
+    # Nearest-rank, not interpolation: with 5-7 trials per cell an
+    # interpolated p90 invents a value no trial produced.
+    k = max(1, math.ceil(0.9 * len(vals)))
+    return vals[k - 1]
 
 
 def load_cells(paths=None, pattern=None):
@@ -122,7 +162,22 @@ def load_cells(paths=None, pattern=None):
         won = [r for r in rs if r["all_pass"]]
         toks = [(r["metrics"] or {}).get("tok_in_billed", 0) for r in rs]
         calls = [(r["metrics"] or {}).get("calls", 0) for r in rs]
-        passes = [1.0 if r["all_pass"] else 0.0 for r in rs]
+        # Ungradeable rows are EXCLUDED from the rate, not counted against
+        # it. They carry all_pass=False because nothing graded them, so
+        # averaging over every row scores a harness fault as a model that
+        # got it wrong -- which the registration forbids in as many words
+        # ("Harness faults are not model failures", docs/EVAL.md).
+        #
+        # This disagreed with the registered analysis, which has always
+        # applied the exclusion. Measured on the 120-run validation grid:
+        # cli-cli-13057 hit the adapter's hard ceiling on 3 of 5 trials and
+        # read 40% here against 100% there -- and 40% is inside the
+        # calibration band while 100% is outside it, so the two surfaces
+        # disagreed about whether that scenario could discriminate at all.
+        # A viewer that can move a scenario in or out of band is not a
+        # display bug.
+        gradeable = [r for r in rs if not is_ungradeable(r)]
+        passes = [1.0 if r["all_pass"] else 0.0 for r in gradeable]
         fails = sorted({c["name"] for r in rs for c in r["checks"]
                         if c["status"] == "fail"})
         cells.append({
@@ -148,6 +203,40 @@ def load_cells(paths=None, pattern=None):
             "dur_s": _med([r.get("duration_s", 0) for r in rs]),
             "fails": fails,
             "rows": rs,
+            # Averages and tails, alongside the medians above. The median
+            # is what the analysis compares; the p90 is what says whether
+            # the median is telling the whole story.
+            "avg_tok": _avg(toks),
+            "p90_tok": _p90(toks),
+            # Cost with the give-ups removed. An abandoned trial spends a
+            # fraction of a real attempt, so an arm that quits more often
+            # looks CHEAPER on the unconditioned median -- measured at 23%
+            # understatement for a1 on the validation grid, against the
+            # very arm the treatment is compared to. The registered
+            # analysis conditions on success; every surface that shows a
+            # raw median has to be able to say so too.
+            "tok_worked": _med([(r["metrics"] or {}).get("tok_in_billed", 0)
+                                for r in rs
+                                if not (r["metrics"] or {}).get("abandoned")]),
+            "avg_calls": _avg(calls),
+            "p90_calls": _p90(calls),
+            "avg_dur": _avg([r.get("duration_s", 0) for r in rs]),
+            "p90_dur": _p90([r.get("duration_s", 0) for r in rs]),
+            "tools": _med([(r["metrics"] or {}).get("tool_calls", 0)
+                           for r in rs]),
+            "avg_tools": _avg([(r["metrics"] or {}).get("tool_calls", 0)
+                               for r in rs]),
+            "p90_tools": _p90([(r["metrics"] or {}).get("tool_calls", 0)
+                               for r in rs]),
+            "avg_probes": _avg([(r["metrics"] or {}).get(
+                "probes_to_first_edit", 0) for r in rs]),
+            "p90_probes": _p90([(r["metrics"] or {}).get(
+                "probes_to_first_edit", 0) for r in rs]),
+            "n_subagents": _med([(r["metrics"] or {}).get("n_subagents", 0)
+                                 for r in rs]),
+            "subagent_tok": _med([(r["metrics"] or {}).get("subagent_tok_in", 0)
+                                  for r in rs]),
+            "ungradeable": sum(1 for r in rs if is_ungradeable(r)),
         })
     cells.sort(key=lambda c: (c["arm"], c["scenario"]))
     if pattern:
@@ -245,6 +334,20 @@ def pareto_front(cells, cost="ktok", quality="pass_rate"):
 
 # ---------- proxy / calibration ----------
 
+def paired_proxy_log(paths):
+    """The proxy log belonging to these results, if one exists.
+
+    isolate.sh writes runs/probe.jsonl -> runs/probe.proxy.jsonl, so the
+    pairing is derivable and the viewer should not need to be told. Asking
+    the user to pass --proxy for a file the harness just wrote next to the
+    results is the kind of step that guarantees the H4 tab stays empty."""
+    for p in paths or []:
+        cand = p[:-len(".jsonl")] + ".proxy.jsonl" if p.endswith(".jsonl") else ""
+        if cand and os.path.exists(cand):
+            return cand
+    return ""
+
+
 def load_proxy(path):
     rows = []
     try:
@@ -270,6 +373,15 @@ def calibration(rows, proxy_rows):
     by_mark = M.split_by_mark(proxy_rows)
     out = []
     for r in rows:
+        # A trial the harness stopped has a transcript truncated by
+        # construction -- or, before salvage existed, none at all. Compared
+        # against the proxy's complete record it reads as a 100% accounting
+        # error, which is not what H4 measures and buries the disagreements
+        # that are real. Excluded here for the same reason exclusion
+        # criterion 1 drops it from every pass rate.
+        if any(c.get("name") == "adapter" and c.get("status") != "pass"
+               for c in r.get("checks", [])):
+            continue
         mark = f"{r['scenario']}|{r.get('arm', '-')}|{r['trial']}"
         pr = by_mark.get(mark)
         if pr is None:

@@ -172,6 +172,51 @@ def warm_at(d: str, env: dict, eco: dict | None = None) -> None:
                    capture_output=True, text=True, timeout=1800)
 
 
+# A compiler complaining that the test names something that does not exist.
+# Go's wording; the shape generalizes and each ecosystem can add its own.
+_MISSING_SYMBOL = (
+    re.compile(r"undefined:\s*([A-Za-z_][\w.]*)"),
+    re.compile(r"unknown field (\w+) in struct literal"),
+    re.compile(r"has no field or method (\w+)"),
+    re.compile(r"undeclared name:\s*(\w+)"),
+)
+
+
+def names_the_test_requires(output: str) -> list[str]:
+    """Identifiers the PR's own tests reference that do not exist yet.
+
+    The fail-before check proves a task goes red at the parent commit. It
+    does not ask *why*, and there are two very different reasons:
+
+      behaviour  the tests compile and assert the wrong answer. An agent
+                 that implements the behaviour passes, whatever it names
+                 its internals. This is a real task.
+      compile    the tests do not build, because they reference a symbol
+                 the fix introduces -- `undefined: findCopilotBinaryFunc`,
+                 `unknown field IssueType in struct literal`. Passing
+                 requires independently choosing the maintainers' exact
+                 identifier. That measures name-guessing, not the work,
+                 and no arm can do it reliably.
+
+    Measured on the validation grid: all four compile-class scenarios
+    scored 0%, 5%, 0%, 0% -- none within the [0.25, 0.80] calibration band
+    -- while every in-band and every ceiling scenario was behaviour-class.
+    A perfect separation, and the dominant cause of the floor problem the
+    registration names as its biggest schedule risk.
+
+    This is why SWE-bench-style grading works for bug fixes and not for
+    feature PRs: a bug fix's tests call API that already exists, while a
+    feature PR's tests call API the PR is adding."""
+    found, seen = [], set()
+    for pat in _MISSING_SYMBOL:
+        for m in pat.finditer(output or ""):
+            name = m.group(1)
+            if name not in seen:
+                seen.add(name)
+                found.append(name)
+    return found
+
+
 def verify(mirror: Path, parent: str, merge: str, test_files: list[str],
            pkgs: list[str], env: dict, eco: dict) -> tuple[bool, str]:
     """Fail-before / pass-after, without a model.
@@ -194,6 +239,19 @@ def verify(mirror: Path, parent: str, merge: str, test_files: list[str],
                                  capture_output=True, text=True, timeout=900)
             if red.returncode == 0:
                 return False, "tests already pass at the parent commit"
+            invented = names_the_test_requires(red.stdout + red.stderr)
+            if invented:
+                # Not a broken task -- a task the UNIT grader cannot judge
+                # fairly. It is handed to the CLI grader instead, which
+                # compares against the merge commit's own binary at the
+                # command line, where the contract is the one the PR body
+                # already gave the agent. Recorded so the choice is on the
+                # record rather than in a heuristic nobody can see.
+                return True, ("cli-graded: the PR's tests name "
+                              + ", ".join(invented[:4])
+                              + ", which the fix introduces, so they cannot "
+                                "compile against any implementation that "
+                                "chose different identifiers")
             # The full post-fix state. Checking out `merge -- .` instead
             # would restore files the merge has but NOT remove files it
             # deleted, so a PR that deletes or renames a source file leaves
@@ -328,14 +386,23 @@ def main():
             drop(n, why)
             continue
 
+        # Which grader can judge this task fairly. `verify` says so: a
+        # task whose tests do not compile at the parent because they name
+        # what the fix introduces cannot be judged by those tests against
+        # an agent that chose different identifiers.
+        cli_graded = why.startswith("cli-graded:")
         keep({
             "pr": n, "ecosystem": kind, "title": pr["title"], "base_commit": pr["base"]["sha"],
             "merge_commit": pr["merge_commit_sha"], "prompt": prompt,
             "test_files": tests, "test_cmd": eco["test_cmd"](pkgs),
             "code_files": code, "additions": pr.get("additions", 0),
             "verified": why,
+            "grader": "cli" if cli_graded else "unit",
+            "invented_symbols": (names_the_test_requires(why)
+                                 if cli_graded else []),
         })
-        print(f"  kept #{n} (+{pr.get('additions',0)}) {pr['title'][:56]}",
+        print(f"  kept #{n} (+{pr.get('additions',0)}) "
+              f"[{'cli' if cli_graded else 'unit'}] {pr['title'][:52]}",
               file=sys.stderr)
 
     gt_f.close()

@@ -10,6 +10,7 @@ standard it grades agents: observed behavior, both directions.
 """
 from __future__ import annotations
 
+import collections
 import random
 import shutil
 import subprocess
@@ -621,6 +622,15 @@ def check_live() -> list[str]:
                             f"half-written last line must be counted, not "
                             f"raised")
 
+        # A liveness check must not be able to affect what it observes.
+        # os.kill(pid, 0) is a probe on POSIX and a real Ctrl-C on Windows,
+        # where signal.CTRL_C_EVENT == 0 -- checking our own pid took the
+        # whole selftest down with a KeyboardInterrupt raised inside an
+        # unrelated subprocess several checks later.
+        if lv._alive(_os.getpid()) and _os.name != "posix":
+            problems.append("_alive() answered on a non-POSIX platform; "
+                            "os.kill(pid, 0) is not an existence probe there")
+
         # No marker: scenario is recoverable from the path, arm is not.
         runs = lv.snapshot(tmp=tmp)
         if len(runs) != 1:
@@ -641,8 +651,27 @@ def check_live() -> list[str]:
         runs = lv.snapshot(tmp=tmp)
         if not runs or runs[0]["arm"] != "a3" or runs[0]["trial"] != 2:
             problems.append("a marked run did not report its own arm/trial")
-        elif runs[0]["budget"] is None:
-            problems.append("budget not computed despite a known timeout")
+        elif runs[0]["budget"] is not None:
+            problems.append(
+                f"budget {runs[0]['budget']} reported for a run in state "
+                f"{runs[0]['state']!r}. The adapter deadline governs a trial "
+                f"that is still generating; a finished one is not racing "
+                f"anything and its clock read 104% before this was fixed")
+
+        # ...and while a trial IS running, the budget is a real fraction and
+        # never exceeds the whole.
+        real_busy = lv.busy_out_dirs
+        lv.busy_out_dirs = lambda: {str(d)}
+        try:
+            runs = lv.snapshot(tmp=tmp)
+        finally:
+            lv.busy_out_dirs = real_busy
+        if not runs or runs[0]["state"] != "running":
+            problems.append("a run whose out-dir is held by a live process "
+                            "must read as running")
+        elif runs[0]["budget"] is None or not 0 <= runs[0]["budget"] <= 1:
+            problems.append(f"budget {runs[0]['budget']} outside [0,1] for a "
+                            f"running trial")
     return problems
 
 
@@ -680,9 +709,12 @@ def check_process_hygiene() -> list[str]:
             grandchild = int((proc.stdout.readline() or "0").strip())
         except ValueError:
             grandchild = 0
-        time.sleep(0.3)
-        leaked = kill_process_group(proc, grace=2.0)
-        time.sleep(0.3)
+        # Generous: this runs alongside whatever else the machine is
+        # doing, and a check that fails under load reports a defect that
+        # is really CPU contention.
+        time.sleep(0.5)
+        leaked = kill_process_group(proc, grace=5.0)
+        time.sleep(0.5)
         if leaked:
             problems.append(f"{leaked} process(es) survived the group kill")
         if grandchild:
@@ -710,6 +742,295 @@ def check_process_hygiene() -> list[str]:
     if "\n" in mkscenarios.yaml_escape("a\nb"):
         problems.append("yaml_escape left a real newline in its output; "
                         "scenario.yaml is a one-line-per-key format")
+    return problems
+
+
+def check_proxy_attribution() -> list[str]:
+    """The H4 gate must be measurable with trials running concurrently.
+
+    The proxy could only attribute a call to a trial through one global
+    mark, so under --jobs>1 the runner skipped marking rather than write an
+    attribution it knew was wrong -- and the gate, which decides whether
+    any cost number in this suite can be trusted, was simply unavailable
+    for every parallel run. The registration called that "the second cost
+    of parallelism".
+
+    It is not a cost, it is a missing key. Each trial now routes through
+    `<proxy>/__run/<run_id>/v1`, so attribution arrives with the request.
+    This drives two trials at one proxy concurrently and asserts no call
+    lands in the wrong bucket -- and that upstream never sees the prefix,
+    because a proxy that alters the request is not measuring it."""
+    import json as _json
+    import tempfile as _tf
+    import threading as _th
+    import urllib.request as _ur
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path as _P
+
+    from adherence import metrics as _M
+    from adherence import proxy as _px
+    problems = []
+    seen_paths = set()
+
+    class Up(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            seen_paths.add(self.path)
+            n = int(self.headers.get("Content-Length") or 0)
+            self.rfile.read(n)
+            time.sleep(0.05)              # force the requests to overlap
+            body = _json.dumps({
+                "choices": [{"message": {"content": "ok"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 5,
+                          "total_tokens": 105}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    up = ThreadingHTTPServer(("127.0.0.1", 0), Up)
+    _th.Thread(target=up.serve_forever, daemon=True).start()
+    tmp = _tf.mkdtemp(prefix="self-proxy-")
+    log = _P(tmp) / "proxy.jsonl"
+    _px.Handler.recorder = _px.Recorder(str(log))
+    _px.Handler.upstream = f"http://127.0.0.1:{up.server_address[1]}"
+    px = ThreadingHTTPServer(("127.0.0.1", 0), _px.Handler)
+    _th.Thread(target=px.serve_forever, daemon=True).start()
+    port = px.server_address[1]
+
+    # Count what actually got through. The invariant under test is "every
+    # call the proxy handled is attributed to the trial that made it", not
+    # "exactly N requests succeeded" -- and a transient client-side error
+    # (seen on 3.10's http.client under keep-alive) would otherwise be
+    # reported as cross-attribution, which is a wrong diagnosis for a
+    # networking hiccup.
+    sent = collections.Counter()
+
+    def fire(run_id, n):
+        for _ in range(n):
+            req = _ur.Request(
+                f"http://127.0.0.1:{port}/__run/{run_id}/v1/chat/completions",
+                data=_json.dumps({"model": "m", "messages": [],
+                                  # tools present, or is_auxiliary() would
+                                  # class these as title-generation overhead
+                                  "tools": [{"type": "function"}]}).encode(),
+                headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                _ur.urlopen(req, timeout=30).read()
+            except Exception:
+                continue                  # counted by omission, not fatal
+            sent[run_id] += 1
+
+    try:
+        a, b = "s01|a1|0|aaa", "s02|a3|2|bbb"
+        ts = [_th.Thread(target=fire, args=(a, 4)),
+              _th.Thread(target=fire, args=(b, 6))]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+
+        # The proxy writes its log row AFTER the response is on the wire
+        # (see proxy._pump_body), so a client that has already read its body
+        # can be a few milliseconds ahead of the recorder. Wait for the log
+        # to settle instead of racing it: this is write latency, not
+        # attribution, and asserting straight through it is what made CI
+        # flaky on the slower runner.
+        deadline = time.time() + 5.0
+        rows = []
+        while True:
+            rows = [_json.loads(x) for x in log.read_text().splitlines()
+                    if x.strip()]
+            if len(rows) >= sum(sent.values()) or time.time() > deadline:
+                break
+            time.sleep(0.05)
+        groups = _M.split_by_mark(rows)
+
+        # The invariant is "no call lands in the wrong bucket", NOT "exactly
+        # N requests succeeded". Those came apart on 3.10, where the client
+        # can also raise on a keep-alive connection AFTER the proxy has
+        # handled and logged the call: `sent` undercounts, the log does not,
+        # and comparing them reported a networking hiccup as
+        # cross-attribution -- a red CI run for the opposite of the defect
+        # under test. Assert attribution directly instead.
+        want = {a: 4, b: 6}
+        expected = {_M.trial_key(k): k for k in want}
+        if len(rows) < 6:
+            problems.append(f"only {len(rows)} of 10 calls reached the proxy; "
+                            f"it is not serving")
+        for key in groups:
+            if key not in expected:
+                problems.append(
+                    f"{key}: calls attributed to a trial that never ran. "
+                    f"Concurrent trials cross-attributed, which is what the "
+                    f"single global mark did and the whole point of the run id")
+        for key, rid in expected.items():
+            got = len(groups.get(key, []))
+            if got < sent[rid]:
+                problems.append(
+                    f"{key}: {sent[rid]} call(s) the client confirmed but only "
+                    f"{got} attributed -- calls are being lost or misfiled")
+            if got > want[rid]:
+                problems.append(
+                    f"{key}: {got} calls attributed but only {want[rid]} were "
+                    f"ever sent to it; it is absorbing another trial's traffic")
+        first = _M.trial_key(a)
+        tot = _M.proxy_totals(groups.get(first, []))
+        # Tied to what the proxy recorded, not to what the client confirmed:
+        # the question here is whether usage survives attribution.
+        if tot["tok_in_billed"] != 100 * len(groups.get(first, [])):
+            problems.append(f"tok_in_billed {tot['tok_in_billed']} does not "
+                            f"match {len(groups.get(first, []))} attributed "
+                            f"calls x 100 -- usage is not surviving attribution")
+        if seen_paths != {"/v1/chat/completions"}:
+            problems.append(f"upstream saw {seen_paths}; the routing prefix "
+                            f"must be stripped, or the proxy is altering "
+                            f"the request it claims to be measuring")
+    finally:
+        px.shutdown()
+        up.shutdown()
+        shutil.rmtree(tmp, ignore_errors=True)
+    return problems
+
+
+def check_cursor_anchoring() -> list[str]:
+    """A cursor over a live list must follow the item, not the row.
+
+    Both live tables grow at the top: runs start and finish, and activity
+    events arrive newest-first. A positional cursor therefore walks
+    backwards one row per arrival -- and an expanded view silently swaps to
+    a different tool call while it is being read. Observed twice, once per
+    table, before either was anchored to an id."""
+    from adherence.matrix_tui import SuiteTui
+    problems = []
+
+    class Fake(SuiteTui):
+        def __init__(self):                       # no curses
+            self.act_cursor = 0
+            self.act_sel = ""
+            self.act_follow = True
+
+    def ev(ids):
+        return [{"id": i} for i in ids]
+
+    t = Fake()
+    t._anchor_act(ev(["c", "b", "a"]))
+    if t.act_sel != "c":
+        problems.append("a fresh cursor must follow the newest event")
+    t._anchor_act(ev(["d", "c", "b", "a"]))
+    if t.act_sel != "d":
+        problems.append("while following, a new event must take the cursor")
+
+    t.act_follow, t.act_cursor, t.act_sel = False, 2, ""
+    t._anchor_act(ev(["d", "c", "b", "a"]))
+    if t.act_sel != "b":
+        problems.append(f"pinning resolved to {t.act_sel!r}, expected 'b'")
+    t._anchor_act(ev(["f", "e", "d", "c", "b", "a"]))
+    if t.act_sel != "b" or t.act_cursor != 4:
+        problems.append(
+            f"after two new events the selection moved to {t.act_sel!r} at "
+            f"index {t.act_cursor}; it must stay on 'b' and slide to 4")
+
+    t._anchor_act(ev(["z", "y", "x"]))
+    if t.act_sel not in {"z", "y", "x"}:
+        problems.append("a selection that rolled out of the window must "
+                        "re-anchor, not leave the cursor dangling")
+    if t._anchor_act([]) is None and t.act_sel != "":
+        problems.append("an empty list must clear the selection")
+    return problems
+
+
+def check_cli_grader() -> list[str]:
+    """Three CLI checks passing must read as success everywhere.
+
+    A CLI-graded task's verdict is `cli.surface` against the PR's own
+    binary. Anything that quietly keeps a structural demand alive -- a
+    failing diff_coverage, say -- would drag all_pass to False and put the
+    task back where Amendment 2 found it: unpassable for reasons the agent
+    was never told."""
+    from adherence.cligrade import command_path
+    problems = []
+
+    def all_pass(cs):
+        return (all(c["status"] == "pass" for c in cs
+                    if c["status"] != "ungradeable")
+                and any(c["status"] == "pass" for c in cs))
+
+    def P(n):
+        return {"name": n, "status": "pass", "evidence": ""}
+
+    def S(n):
+        return {"name": n, "status": "ungradeable", "evidence": ""}
+
+    def F(n):
+        return {"name": n, "status": "fail", "evidence": ""}
+
+    cases = [
+        ("three CLI passes", [P("cli.builds"), P("cli.surface"),
+                              P("cli.extra_surface")], True),
+        ("plus advisory checks", [S("pr.diff_coverage"), S("pr.scope"),
+                                  S("pr.route"), P("cli.builds"),
+                                  P("cli.surface"), P("cli.extra_surface")],
+         True),
+        ("a missing flag fails", [P("cli.builds"), F("cli.surface"),
+                                  P("cli.extra_surface")], False),
+        ("a broken build fails", [F("cli.builds")], False),
+    ]
+    for label, cs, want in cases:
+        if all_pass(cs) is not want:
+            problems.append(f"{label}: all_pass={all_pass(cs)}, expected "
+                            f"{want}")
+
+    # The command battery must be derived, never authored.
+    if command_path(["pkg/cmd/issue/create/create.go"]) != ["issue", "create"]:
+        problems.append("command path is not derived from the PR's own file "
+                        "paths; an experimenter choosing which commands to "
+                        "test is an experimenter choosing the result")
+    if command_path(["api/queries_issue.go"]):
+        problems.append("a PR touching no command must yield no CLI battery")
+    return problems
+
+
+def check_abandoned() -> list[str]:
+    """`abandoned` must mean the agent gave up, and nothing else.
+
+    Two ways it lied. It fired on a trial the HARNESS killed -- a 45-minute
+    run cut off at its ceiling with 27 MB of events was recorded as having
+    given up, the opposite of what happened. And it fired on a trial that
+    edited through the shell: EDIT events exist only for tools naming a
+    file in their input, so an agent using a heredoc or `sed -i` changes
+    files git can see and the transcript cannot. Measured on a trial with
+    26 calls, 35 tool calls and every check passing."""
+    problems = []
+    t = [schema.capability(task_events=True)] + [
+        schema.command("sed -i s/a/b/ f.go") for _ in range(5)]
+
+    cases = [
+        ("harness killed it", dict(completed=False), False),
+        ("edited via the shell, git saw 3",
+         dict(completed=True, observed_edits=3), False),
+        ("touched nothing, git agrees",
+         dict(completed=True, observed_edits=0), True),
+        ("no git answer, fall back to the transcript",
+         dict(completed=True, observed_edits=-1), True),
+    ]
+    for label, kw, want in cases:
+        got = metrics.abandoned(t, True, **kw)
+        if got is not want:
+            problems.append(f"{label}: abandoned={got}, expected {want}")
+
+    # A real give-up still has to be caught, or the flag is useless.
+    quit_early = [schema.capability(task_events=True),
+                  schema.probe("read", "a.go", 10)]
+    if not metrics.abandoned(quit_early, True, completed=True,
+                             observed_edits=0):
+        problems.append("a trial that made one probe and stopped was not "
+                        "flagged; an arm whose token advantage comes from "
+                        "giving up sooner has to be caught here")
     return problems
 
 
@@ -825,6 +1146,10 @@ CHECKS = (
     ("harness fault is not a model failure", check_harness_exclusion),
     ("live run reader", check_live),
     ("process hygiene", check_process_hygiene),
+    ("live cursor anchoring", check_cursor_anchoring),
+    ("cli grader verdicts", check_cli_grader),
+    ("abandoned means gave up", check_abandoned),
+    ("proxy attribution under concurrency", check_proxy_attribution),
     ("pre-specified analysis", check_analysis),
     ("stdlib test runner", check_test_runner),
     ("fixture noise filter", check_noise_filter),
