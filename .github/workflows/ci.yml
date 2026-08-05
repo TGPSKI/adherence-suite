@@ -142,20 +142,24 @@ jobs:
         run: ruff check .
 
   # ─────────────────────────────────────────────────────────────────────────
-  # Cross-platform, full-scope checks.
-  # Triggers:
-  #   - PR carrying the `full-test` label
-  #   - manual `workflow_dispatch`
-  #   - any push to `main`
+  # Cross-platform, full-scope checks. Runs on EVERY pull request.
+  #
+  # It used to be opt-in: a `full-test` label, a manual dispatch, or a push
+  # to main. Which meant a platform bug could only ever be discovered on
+  # main, after merging -- and that is exactly what happened, four pushes in
+  # a row, every one of them `windows/amd64`. The gate that was supposed to
+  # let you test portability before merging did not even fire on `labeled`,
+  # so in practice the only trigger was the one that runs too late.
+  #
+  # `needs: validate` still keeps these three runners idle when the fast
+  # gate is already red, so the cost is ~1 extra minute on a PR that was
+  # going to pass anyway. A permanently red main costs more than that: it
+  # trains everyone to stop reading CI, and then it stops being a signal at
+  # all.
   # ─────────────────────────────────────────────────────────────────────────
   full-scope:
     name: Full-scope (${{ matrix.label }})
     needs: validate
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-        contains(github.event.pull_request.labels.*.name, 'full-test')) ||
-      (github.event_name == 'push' && github.ref == 'refs/heads/main')
     timeout-minutes: 20
 
     strategy:
