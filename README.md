@@ -161,6 +161,6 @@ care about.
 GPL-3.0-only. See [LICENSE](LICENSE).
 
 `src/adherence/tui/` is vendored verbatim from
-[leather](https://github.com/TGPSKI/leather) (GPL-3.0), which is why this is
-GPL rather than permissive. Upstream owns that API — re-copy rather than
-diverge.
+[pane](https://github.com/TGPSKI/pane) (GPL-3.0), which is why this is
+GPL rather than permissive. Upstream owns that API — re-vendor with pane's
+`tools/vendor.sh` rather than diverge.
