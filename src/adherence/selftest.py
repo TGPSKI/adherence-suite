@@ -836,24 +836,43 @@ def check_proxy_attribution() -> list[str]:
 
         rows = [_json.loads(x) for x in log.read_text().splitlines() if x.strip()]
         groups = _M.split_by_mark(rows)
-        if sum(sent.values()) < 6:
-            problems.append(f"only {sum(sent.values())} of 10 requests "
-                            f"completed; the proxy is not serving")
-        for rid, want in sent.items():
-            key = _M.trial_key(rid)
-            got = len(groups.get(key, []))
-            if got != want:
+
+        # The invariant is "no call lands in the wrong bucket", NOT "exactly
+        # N requests succeeded". Those came apart on 3.10, where the client
+        # can raise on a keep-alive connection AFTER the proxy has already
+        # handled and logged the call: `sent` undercounts, the log does not,
+        # and comparing them reported a networking hiccup as
+        # cross-attribution -- a red CI run for the opposite of the defect
+        # under test. Assert attribution directly instead.
+        want = {a: 4, b: 6}
+        expected = {_M.trial_key(k): k for k in want}
+        if len(rows) < 6:
+            problems.append(f"only {len(rows)} of 10 calls reached the proxy; "
+                            f"it is not serving")
+        for key in groups:
+            if key not in expected:
                 problems.append(
-                    f"{key}: {want} call(s) succeeded but {got} were "
-                    f"attributed to it. Concurrent trials cross-attributed, "
-                    f"which is what the single global mark did and the "
-                    f"whole point of the run id")
-        first = _M.trial_key("s01|a1|0|aaa")
+                    f"{key}: calls attributed to a trial that never ran. "
+                    f"Concurrent trials cross-attributed, which is what the "
+                    f"single global mark did and the whole point of the run id")
+        for key, rid in expected.items():
+            got = len(groups.get(key, []))
+            if got < sent[rid]:
+                problems.append(
+                    f"{key}: {sent[rid]} call(s) the client confirmed but only "
+                    f"{got} attributed -- calls are being lost or misfiled")
+            if got > want[rid]:
+                problems.append(
+                    f"{key}: {got} calls attributed but only {want[rid]} were "
+                    f"ever sent to it; it is absorbing another trial's traffic")
+        first = _M.trial_key(a)
         tot = _M.proxy_totals(groups.get(first, []))
-        if tot["tok_in_billed"] != 100 * sent.get("s01|a1|0|aaa", 0):
+        # Tied to what the proxy recorded, not to what the client confirmed:
+        # the question here is whether usage survives attribution.
+        if tot["tok_in_billed"] != 100 * len(groups.get(first, [])):
             problems.append(f"tok_in_billed {tot['tok_in_billed']} does not "
-                            f"match {sent.get('s01|a1|0|aaa', 0)} calls x 100 "
-                            f"-- usage is not surviving attribution")
+                            f"match {len(groups.get(first, []))} attributed "
+                            f"calls x 100 -- usage is not surviving attribution")
         if seen_paths != {"/v1/chat/completions"}:
             problems.append(f"upstream saw {seen_paths}; the routing prefix "
                             f"must be stripped, or the proxy is altering "

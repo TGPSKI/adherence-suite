@@ -189,7 +189,16 @@ a project. The 2,700 s ceiling was not the problem — the scenario was.*
 ## 5. Defects found by this grid
 
 The grid's other job is to break the instrument before the experiment does.
-Three defects surfaced, all fixed.
+Four defects surfaced, all fixed.
+
+**Three of them were the same defect in three different surfaces**: the viewer
+(§5.1), the runner's verdict (§5.4), and — already correct — the registered
+analysis. Each computed a pass rate by dividing over every trial, counting
+harness faults as model failures. The registered analysis had always applied
+the exclusion, so the disagreement was silent until someone compared them.
+
+There is now one `is_ungradeable()` predicate in `suitedata`, imported by the
+others. One definition, so the surfaces cannot drift apart again.
 
 ### 5.1 The viewer scored harness faults as model failures — and it moved a scenario in-band
 
@@ -235,7 +244,45 @@ so §2's count is unaffected; dropping it makes the cli tier 1 of 14. The fix is
 in the tree and `mkscenarios` now refuses such tasks at extraction, so a
 re-run would not produce them.
 
-### 5.4 A sharp edge left in place
+### 5.4 The go/no-go verdict itself was wrong — a third surface, same defect
+
+`probe.py` prints the fixture's verdict at the end of every run. The raw
+transcript of this grid is preserved at
+[`VALIDATION-120-make-probe-sh.txt`](VALIDATION-120-make-probe-sh.txt), and it
+ends:
+
+```
+cli-cli-13057             40%       5  KEEP
+...
+7 of 24 tasks land in [0.25, 0.80]
+  16 ceiling · 1 floor · 0 harness
+
+VERDICT: proceed with thin margin (7 usable).
+```
+
+Two defects, compounding:
+
+1. The adapter check reports a ceiling hit as `ungradeable`, not `fail`, and
+   the harness counter matched on `"fail"`. It printed **`0 harness`** for a
+   run in which three trials were killed at 2,700 s.
+2. The rate divided by all five trials, so those three counted as model
+   failures — `cli-cli-13057` read **40%** and was marked **KEEP**, landing
+   inside the band, when its gradeable trials were 2 of 2 and it belongs
+   outside.
+
+Corrected, the same command now prints:
+
+```
+cli-cli-13057            100%       2  ceiling — drop
+6 of 24 tasks land in [0.25, 0.80]
+```
+
+This was the worst of the three places to hold the defect, because it is the
+one that renders a decision rather than a number. The headline in §2 is **6**;
+the transcript's **7** is preserved unedited as the record of what the
+instrument said before it was fixed.
+
+### 5.5 A sharp edge left in place
 
 `status: "ungradeable"` is used both for *"this check could not run"* and for
 informational skips such as `cli.extra_surface`. Across the grid there are 174
@@ -305,8 +352,9 @@ instrument is honest about it.*
 
 **Open before the experiment can run:**
 
-1. Drop `cli-cli-13523` and `cli-cli-13057`; re-extract with the current
-   `mkscenarios`.
+1. Drop `cli-cli-13523` (grader hole) and `cli-cli-13057` (unusable on two
+   axes); re-extract with the current `mkscenarios`. `probe.py` now agrees —
+   it marks both for dropping without being told.
 2. Materialize arms `a0`, `a2`–`a5` and re-run `floors` for the bytes-per-token
    agreement check.
 3. Decide whether to run on the unit-graded subset only. The registration

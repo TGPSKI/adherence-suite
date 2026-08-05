@@ -103,7 +103,7 @@ def newest_mtime(paths=None):
 
 # ---------- cells ----------
 
-def _ungradeable(row) -> bool:
+def is_ungradeable(row) -> bool:
     """Did the harness fail to produce something judgeable?
 
     One definition, used by both the `ung` column and the pass rate, so a
@@ -176,7 +176,7 @@ def load_cells(paths=None, pattern=None):
         # disagreed about whether that scenario could discriminate at all.
         # A viewer that can move a scenario in or out of band is not a
         # display bug.
-        gradeable = [r for r in rs if not _ungradeable(r)]
+        gradeable = [r for r in rs if not is_ungradeable(r)]
         passes = [1.0 if r["all_pass"] else 0.0 for r in gradeable]
         fails = sorted({c["name"] for r in rs for c in r["checks"]
                         if c["status"] == "fail"})
@@ -236,7 +236,7 @@ def load_cells(paths=None, pattern=None):
                                  for r in rs]),
             "subagent_tok": _med([(r["metrics"] or {}).get("subagent_tok_in", 0)
                                   for r in rs]),
-            "ungradeable": sum(1 for r in rs if _ungradeable(r)),
+            "ungradeable": sum(1 for r in rs if is_ungradeable(r)),
         })
     cells.sort(key=lambda c: (c["arm"], c["scenario"]))
     if pattern:

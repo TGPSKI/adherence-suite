@@ -18,6 +18,8 @@ import json
 import sys
 from collections import defaultdict
 
+from adherence.suitedata import is_ungradeable
+
 BAND = (0.25, 0.80)
 MIN_USABLE = 6          # registered stopping rule in docs/EVAL.md
 
@@ -42,12 +44,25 @@ def main() -> int:
 
     keep, ceiling, floor, broken = [], [], [], []
     for sid, rs in sorted(by.items()):
-        rate = sum(1 for r in rs if r["all_pass"]) / len(rs)
-        adapter_fail = sum(1 for r in rs
-                           if any(c["name"] == "adapter" and c["status"] == "fail"
-                                  for c in r["checks"]))
-        row = (sid, rate, len(rs), adapter_fail)
-        if adapter_fail == len(rs):
+        # Two defects lived here, and together they kept a dead scenario.
+        #
+        # The adapter check reports a ceiling hit as `ungradeable`, not
+        # `fail`, so matching on "fail" counted zero harness faults for a
+        # run that had three -- the summary printed "0 harness" while three
+        # trials had been killed at 2700s.
+        #
+        # And the rate divided by every trial, so those three counted as
+        # model failures: cli-cli-13057 read 40% (2 of 5) and landed inside
+        # the band, when its gradeable trials were 2 of 2 and it belongs
+        # outside. The registration is explicit -- "harness faults are not
+        # model failures" -- and this is the surface that prints the go/no-go
+        # verdict, so it was the worst of the three places to get it wrong.
+        broken_n = sum(1 for r in rs if is_ungradeable(r))
+        graded = [r for r in rs if not is_ungradeable(r)]
+        rate = (sum(1 for r in graded if r["all_pass"]) / len(graded)
+                if graded else 0.0)
+        row = (sid, rate, len(graded), broken_n)
+        if not graded:
             broken.append(row)
         elif rate > BAND[1]:
             ceiling.append(row)
