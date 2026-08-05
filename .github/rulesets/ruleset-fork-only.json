@@ -4,8 +4,12 @@
   "enforcement": "active",
   "conditions": {
     "ref_name": {
-      "include": ["~ALL"],
-      "exclude": ["refs/heads/main"]
+      "include": [
+        "~ALL"
+      ],
+      "exclude": [
+        "refs/heads/main"
+      ]
     }
   },
   "bypass_actors": [
@@ -16,8 +20,14 @@
     }
   ],
   "rules": [
-    { "type": "creation" },
-    { "type": "update" },
-    { "type": "deletion" }
+    {
+      "type": "creation"
+    },
+    {
+      "type": "update"
+    },
+    {
+      "type": "deletion"
+    }
   ]
 }

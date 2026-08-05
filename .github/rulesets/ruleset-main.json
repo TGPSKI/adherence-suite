@@ -4,7 +4,9 @@
   "enforcement": "active",
   "conditions": {
     "ref_name": {
-      "include": ["refs/heads/main"],
+      "include": [
+        "refs/heads/main"
+      ],
       "exclude": []
     }
   },
@@ -21,14 +23,26 @@
       "parameters": {
         "strict_required_status_checks_policy": true,
         "required_status_checks": [
-          { "context": "Validate (3.10)" },
-          { "context": "Validate (3.14)" },
-          { "context": "Lint" }
+          {
+            "context": "Validate (3.10)"
+          },
+          {
+            "context": "Validate (3.14)"
+          },
+          {
+            "context": "Lint"
+          }
         ]
       }
     },
-    { "type": "non_fast_forward" },
-    { "type": "deletion" },
-    { "type": "required_signatures" }
+    {
+      "type": "non_fast_forward"
+    },
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "required_signatures"
+    }
   ]
 }
