@@ -10,6 +10,13 @@ work"* — only one arm ran. It is *"can this fixture supply tasks that
 discriminate between arms at all, and does the instrument measure them
 honestly."*
 
+![The design tab: arm a1 described as the practical control, its always-loaded surface measured at 6,518 bytes with surface sha 5caa66e9, followed by the eight ground rules the run is bound by.](media/validation/validation-a1-design-tab.png)
+
+*The rules this grid is bound by, read off disk rather than off a document —
+`[design]`. Four of them decide what follows: cost is meaningless without the
+pass rate beside it, the calibration band is `[0.25, 0.80]`, harness faults are
+never model failures, and validation never becomes evidence.*
+
 ---
 
 ## 1. What ran
@@ -30,6 +37,13 @@ honestly."*
 Cost: 370,649,394 prompt tokens billed, 1,768,053 completion, 11.8 h of summed
 trial duration across three workers. Median trial 161 s; longest 2,701 s — the
 hard ceiling, which matters below.
+
+![The live view mid-run at 73 of 120: three running trials with their current shell commands, a per-scenario summary with pass rates and token medians, and a scrolling table of graded results newest-first.](media/validation/validation.png)
+
+*The grid in flight at 73/120. Three workers, one row each, with the command
+each is executing; the per-cell rollup beneath; graded results newest-first.
+`0 stalled` is a rendered state, not an absence — a hung worker would appear
+here rather than silently vanish.*
 
 ---
 
@@ -54,6 +68,14 @@ comparison and the registration treats the tiers as different evidence.
 **The CLI tier does not discriminate.** Eleven of fifteen cli-graded scenarios
 sit at 100%. A grader that everything passes cannot separate arms, whatever its
 other virtues.
+
+![The cost view: a pass-rate-versus-tokens scatter in which sixteen starred cells all sit on the 100% line, spread across the full width of the x-axis from 202k to 18,833k tokens, with only a handful of unstarred points below.](media/validation/validation-a1-cost-Pareto.png)
+
+*The ceiling, rendered. Sixteen cells on the Pareto frontier and **every one of
+them at 100%**, spread across a 93× range of input tokens — 202k to 18,833k.
+When the quality axis is pinned, the frontier degenerates into "whichever was
+cheapest," and cost stops being a trade-off against anything. This is the
+single clearest argument for treating the CLI tier as secondary.*
 
 ---
 
@@ -96,6 +118,15 @@ Failing checks across the grid: `pr.task_pass` ×8, `cli.surface` ×5,
 `pr.diff_coverage` ×2, `cli.builds` ×1. Seven rows abandoned.
 Fifty-nine of 120 rows spawned subagents, consuming 24,125,708 input tokens
 that the parent stream does not carry.
+
+![A cell detail card for a1/cli-cli-13068: median, mean, p90 and p90-over-median for tokens, calls, tool calls, probes to first edit and duration; then trials 5, pass@1 100%, two medians for tokens, ungradeable 0 of 5, abandoned 1 of 5, subagents dispatched, and a per-trial breakdown.](media/validation/validation-a1-live-summary-cli-cli-13068.png)
+
+*One cell opened with `[space]`. Two things to notice. The p90/median column
+flags a 2.1× token tail in red — a median that looks cheap while the tail runs
+away is not cheap. And there are **two** token medians: 1,383,795 over passing
+trials against 1,902,217 over trials that actually worked, because the one
+abandoned trial spends a fraction of a real attempt and drags the headline
+number down. Reporting a single median here would understate cost by 27%.*
 
 ---
 
@@ -143,6 +174,15 @@ calibration failure does not touch a single scenario the experiment would use.
 3. `cli-cli-13057` is unusable on both axes: 3 of 5 trials ungradeable, 4 of 5
    abandoned, and a 90.7% accounting divergence. It should be dropped from the
    fixture rather than carried.
+
+![The tasks tab for cli-cli-13057: PR 13057, judged by the PR's own binary flag-for-flag, forced by symbols IssueRelationshipsSupported and IssueType, answer spanning six directories, thirteen files touched, a 1800 second timeout, and a 173-line prompt beginning 'Add Issues 2.0 support: issue types, sub-issues, and relationships' that closes five separate issues.](media/validation/validation-a1-tasks-cli-cli-13057.png)
+
+*Why `13057` blew the ceiling, from the `[tasks]` tab — which carries no run
+data at all, only what the scenario asks and how it is judged. It is a
+**173-line prompt** implementing GitHub Issues 2.0 across `create`, `edit`,
+`view` and `list`, closing five separate issues, touching 13 files across six
+directories. This is not a task that a five-trial cell can characterize; it is
+a project. The 2,700 s ceiling was not the problem — the scenario was.*
 
 ---
 
@@ -207,6 +247,15 @@ The row-level definition correctly keys on the `adapter` check by name, so no
 reported number is affected. Recorded because the next person to write an
 ad-hoc query will hit it.
 
+![A single trial's check list for cli-cli-13068 trial 0, verdict pass: pr.diff_coverage pass, pr.scope pass, pr.route ungradeable with routing evidence, cli.builds pass, cli.surface pass, cli.extra_surface pass.](media/validation/validation-a1-0-live-grading-cli-cli-13068.png)
+
+*The edge, on screen. This trial's verdict is **pass**, and one of its checks is
+**ungradeable** — `pr.route`, which could not judge routing because the trail
+shows no first edit to anchor on. A check that cannot run is not a row that
+cannot be graded, and conflating the two classifies all 120 rows as harness
+faults. Note also `purpose: validation` on the card: the guard is visible on
+every single trial, not just in the file header.*
+
 ---
 
 ## 6. Instrument floors
@@ -240,6 +289,15 @@ materialized.
 
 - **Any statement about the directed-contexts pattern.** One arm ran. There is
   no comparison here, and there is no primary outcome.
+
+![The arms rollup showing exactly one row: a1, monolith-realistic, 24 scenarios, 120 trials, 88% pass@1, 1,260,354 median tokens, 26 calls, marked 'reference' in the ratio columns, which are otherwise empty.](media/validation/validation-a1-arms-rollup.png)
+
+*The most honest image in this document. The arms rollup exists to show paired
+geometric ratios against the reference, and here it shows **one row** — a1
+compared to itself, with the ratio columns empty because there is nothing to
+divide by. The 88% is a1's unweighted mean across 24 scenarios, and it is not a
+finding about anything. This is what "no experiment ran" looks like when the
+instrument is honest about it.*
 - **Any cost figure from the adapter.** H4 failed; the proxy is authoritative.
 - **Any claim that 24 scenarios is the working set.** After dropping
   `cli-cli-13523` (grader hole) and `cli-cli-13057` (unusable on two axes), the
