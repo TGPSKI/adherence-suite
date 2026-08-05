@@ -437,12 +437,17 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
         # Liveness, best evidence first: a process still naming this
         # out-dir, then the runner's recorded pid, and only if `ps` is
         # unavailable the weak "stream moved recently" guess.
+        # `known` records whether liveness was OBSERVED or guessed. A guess
+        # is fine for deciding what to draw; it is not fine as the basis of
+        # a deadline percentage, which reads as measurement.
+        known = True
         if busy is not None:
             alive = d in busy
         elif m.get("pid") and os.name == "posix":
             alive = _alive(int(m["pid"]))
         else:
             alive = age < STALE_S
+            known = False
         if age > ABANDONED_S and not alive:
             continue                    # debris from a killed run
 
@@ -450,7 +455,14 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
 
         # Prefer the stream's own clock: it starts at the first inference
         # call and is present even when the marker is not.
-        if st["first_ts"]:
+        # ...but only if that clock IS a clock. A relative or synthetic
+        # timestamp makes `now - first_ts` astronomically large, and the
+        # budget then pins at 100% on a run that just started -- the worst
+        # possible direction to be wrong in, because 100% is exactly what a
+        # run about to be killed looks like. An epoch in milliseconds is
+        # past 1e12 (2001); anything below that is not a wall clock and the
+        # marker's mtime is the better answer.
+        if st["first_ts"] > 1e12:
             elapsed = max(elapsed, (now * 1000 - st["first_ts"]) / 1000.0)
 
         kids = _subagents(p, st.get("root_session", ""))
@@ -490,8 +502,13 @@ def snapshot(tmp: str | None = None, root: Path | None = None,
             # generating. Grading is unbounded and a finished trial is not
             # racing anything, so a percentage there is meaningless -- it
             # read 104% on a run that had already stopped.
+            # ...and only when liveness was observed rather than guessed.
+            # Without `ps` (Windows) the fallback is "the stream moved
+            # recently", which reports a leftover directory as running --
+            # so a deadline percentage there is a number derived from a
+            # guess, wearing the authority of a measurement.
             "budget": ((min(elapsed / timeout, 1.0) if timeout else None)
-                       if state in ("running", "stalled") else None),
+                       if state in ("running", "stalled") and known else None),
             "idle_s": age,
             "state": state,
             "unlabelled": bool(m.get("unlabelled")),
